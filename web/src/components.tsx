@@ -123,7 +123,7 @@ export function SearchBox({ compact = false, autoFocus = false }: { compact?: bo
                 {h.nazev || "(bez názvu)"} <span className="muted small">IČO {h.ico}</span>
               </span>
               <span className="meta">
-                {h.jen_ares ? "jen v ARES, bez zakázek" : `${num(h.vyhry)} výher · ${kc(h.objem)}`}
+                {h.jen_ares ? "jen v ARES, bez zakázek" : `${num(h.vyhry)} výher v soutěžích · ${kc(h.objem)}${h.smluv_rs ? ` · ${num(h.smluv_rs)} smluv` : ""}`}
               </span>
             </a>
           ))}

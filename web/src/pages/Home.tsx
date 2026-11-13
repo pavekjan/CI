@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, type Stav, type Trh } from "../api";
 import { BarList, Card, Kpi, SearchBox, go } from "../components";
-import { datum, kc, num, pct } from "../format";
+import { datum, kc, mesic, num, pct } from "../format";
 
 export default function Home({ stav }: { stav: Stav | null }) {
   const [trh, setTrh] = useState<Trh | null>(null);
@@ -21,7 +21,9 @@ export default function Home({ stav }: { stav: Stav | null }) {
 
       {prazdno && (
         <div className="callout info">
-          Databáze je zatím prázdná. Otevřete stránku <a href="#/data">Data</a> a klikněte na <b>Rychlá aktualizace</b>: stáhnou se zakázky za poslední 3 měsíce (pár minut).
+          {stav?.verejne
+            ? <>Databáze je zatím prázdná. Data se připravují, zkuste to prosím později.</>
+            : <>Databáze je zatím prázdná. Otevřete stránku <a href="#/data">Data</a> a klikněte na <b>Rychlá aktualizace</b>: stáhnou se zakázky za poslední 3 měsíce (pár minut).</>}
         </div>
       )}
 
@@ -30,7 +32,7 @@ export default function Home({ stav }: { stav: Stav | null }) {
           <Kpi label="Zakázek v databázi" value={num(stav.zakazek)} note={stav.od ? `${datum(stav.od)} – ${datum(stav.do)}` : undefined} />
           <Kpi label="Dodavatelů" value={num(stav.dodavatelu)} />
           <Kpi label="Vítězných nabídek" value={num(stav.vitezu)} />
-          <Kpi label="Smluv z Registru smluv" value={num(stav.smluv)} />
+          <Kpi label="Smluv z Registru smluv" value={num(stav.smluv)} note={stav.obdobi?.rs_od ? `${mesic(stav.obdobi.rs_od)} – ${mesic(stav.obdobi.rs_do!)}` : undefined} />
         </div>
       )}
 
@@ -45,12 +47,12 @@ export default function Home({ stav }: { stav: Stav | null }) {
               onClick={(t) => go(`/firma/${t.ico}`)}
             />
           </Card>
-          <Card title="Segmenty trhu" sub="Počet zakázek podle oddílu CPV. Kliknutím zobrazíte detail segmentu.">
+          <Card title="Segmenty trhu" sub={<>Počet zakázek podle oddílu CPV. Kliknutím zobrazíte detail segmentu.{trh.odhadnuto ? <> U zakázek bez CPV je segment <span className="badge warn">odhad</span> podle názvu; „neuvedeno“ jsou ty, které odhadnout nešly.</> : null}</>}>
             <BarList
               items={trh.segmenty.slice(0, 12)}
               value={(s) => s.pocet}
               label={(s) => s.segment}
-              right={(s) => num(s.pocet)}
+              right={(s) => <>{num(s.pocet)}{s.odhad ? <span className="secondary small" title="z toho odhadnuto podle názvu zakázky"> · {num(s.odhad)} odhad</span> : null}</>}
               onClick={(s) => go(`/trh/${encodeURIComponent(s.segment)}`)}
             />
           </Card>

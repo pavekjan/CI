@@ -239,7 +239,7 @@ def _historie(con, ico):
     ceny = [v["cena_bez_dph"] or v["predpokladana_hodnota"] for v in vyhry if (v["cena_bez_dph"] or v["predpokladana_hodnota"])]
     ceny.sort()
     q = (lambda p: ceny[min(len(ceny) - 1, int(p * len(ceny)))]) if ceny else (lambda p: None)
-    cpv8 = Counter(v["cpv_hlavni"] for v in vyhry if v["cpv_hlavni"])
+    cpv8 = Counter(v["cpv_hlavni"] for v in vyhry if v["cpv_hlavni"] and len(v["cpv_hlavni"]) >= 8)  # bez odhadu segmentu
     seg = Counter(cpv_group(v["cpv_hlavni"]) for v in vyhry)
     zad = defaultdict(lambda: {"pocet": 0, "objem": 0.0, "nazev": None})
     for v in vyhry:
@@ -258,7 +258,8 @@ def _historie(con, ico):
         "vyher": len(vyhry), "ucasti": ucasti, "objem_czk": round(sum(v["cena_bez_dph"] or 0 for v in vyhry)),
         "median_zakazky_czk": _median(ceny), "p25_czk": q(0.25), "p75_czk": q(0.75), "max_czk": ceny[-1] if ceny else None,
         "top_cpv": [{"cpv": c, "pocet": n, "segment": cpv_group(c)} for c, n in cpv8.most_common(12)],
-        "segmenty": [{"segment": s, "pocet": n} for s, n in seg.most_common(6)],
+        # "neuvedeno" (zakazky bez CPV a bez odhadu) neni obor -> do profilu ani otazek nepatri
+        "segmenty": [{"segment": s, "pocet": n} for s, n in seg.most_common(7) if s != "neuvedeno"][:6],
         "top_zadavatele": sorted(({"ico": k, **v} for k, v in zad.items()), key=lambda x: (-x["pocet"], -x["objem"]))[:10],
         "kraje": [{"nuts3": k, "kraj": nazev_kraje(k), "pocet": n} for k, n in kraje.most_common()],
         "nazvy_vyher": [v["nazev"] for v in sorted(vyhry, key=lambda x: x["datum_zahajeni"] or "", reverse=True)[:25]],
@@ -399,7 +400,7 @@ def faze1_pravidla(rc):
     if h["registr_smluv"]["pocet"]:
         shr += f"V Registru smluv {h['registr_smluv']['pocet']} smluv za {kc(h['registr_smluv']['objem_czk'])}."
 
-    q1 = [x["segment"].split(" ", 1)[1] for x in h["segmenty"][:3]] or [p for p, _ in nace_cpv(rc)[:4]] or {
+    q1 = [x["segment"].split(" ", 1)[-1] for x in h["segmenty"][:3] if x["segment"] != "neuvedeno"] or [p for p, _ in nace_cpv(rc)[:4]] or {
         "stavebnictvi": ["Pozemní stavby", "Silnice a komunikace", "Vodovody a kanalizace"],
         "it_sw": ["Vývoj software na zakázku", "Provoz a podpora IS", "Licence a cloud"],
         "facility_sluzby": ["Úklid", "Údržba budov", "Ostraha"],
@@ -651,6 +652,10 @@ def _ocisti_profil(p, zaloha, rc):
                    "max_czk": b.get("max_czk") if b.get("max_czk") is not None else zb.get("max_czk"),
                    "vzmr_interest": bool(b.get("vzmr_interest", zb.get("vzmr_interest")))}
     p["min_prep_days"] = int(p.get("min_prep_days") or 10)
+    try:  # rocni obrat firmy (zadava uzivatel) - pro odhad kvalifikace; ARES ho neuvadi
+        p["obrat_czk"] = max(0.0, min(float(p.get("obrat_czk") or 0), 1e12)) or None
+    except (TypeError, ValueError):
+        p["obrat_czk"] = None
     p["sidlo"] = rc["sidlo"]
     return p
 
@@ -767,7 +772,77 @@ def uloz_profil(con, ico, profil, today=None, vlastnik=""):
 
 
 # ------------------------------------------------------------------ 3. DOTAZNIK VHODNOSTI + ZPRAVODAJ
-VAHY = {"predmet": 30, "lokalita": 20, "velikost": 15, "cas": 10, "zadavatel": 10, "konkurence": 10, "kvalifikace": 5}
+VAHY = {"predmet": 30, "lokalita": 20, "velikost": 15, "cas": 10, "zadavatel": 10, "konkurence": 10, "kvalifikace": 15}
+
+
+def kapacita(con, ico, today=None):
+    """Co firma prokazatelne zvlada podle verejnych dat (pro odhad kvalifikace):
+    - verejne trzby za 12 mesicu = vyhry v RVZ + smlouvy v Registru smluv (spodni odhad obratu),
+    - reference po oborech CPV: vyhrane zakazky za 3 roky (pocet a hodnoty)."""
+    today = today or date.today()
+    od12, od36 = (today - timedelta(days=365)).isoformat(), (today - timedelta(days=3 * 365)).isoformat()
+    rvz12 = con.execute("""SELECT COALESCE(SUM(v.cena_bez_dph), 0) FROM vitezove v JOIN zakazky z ON z.id=v.zakazka_id
+                           WHERE v.dodavatel_ico=? AND z.datum_zahajeni >= ?""", (ico, od12)).fetchone()[0]
+    rs12 = con.execute("SELECT COALESCE(SUM(hodnota), 0) FROM smlouvy_souhrn WHERE ico=? AND mesic >= ?", (ico, od12[:7])).fetchone()[0]
+    ref = defaultdict(list)
+    for cpv, cena, odhad in con.execute("""SELECT z.cpv_hlavni, v.cena_bez_dph, z.predpokladana_hodnota FROM vitezove v
+                                           JOIN zakazky z ON z.id=v.zakazka_id WHERE v.dodavatel_ico=? AND z.datum_zahajeni >= ?""",
+                                        (ico, od36)):
+        h = cena or odhad
+        if cpv and h:
+            ref[cpv[:2]].append(h)
+    return {"verejne_trzby_12m": (rvz12 or 0) + (rs12 or 0), "reference": dict(ref)}
+
+
+def _kvalifikace(z, profil, kap):
+    """Splni firma pravdepodobne kvalifikaci? Bez textu zadavaci dokumentace jde jen o odhad:
+    - obrat: zadavatel smi pozadovat nejvyse 2x predpokladanou hodnotu (ZZVZ § 78 odst. 3); kdyz zdroj uvadi
+      pozadovany obrat, pouzije se ten,
+    - reference: zadavatele obvykle chteji 2-3 obdobne zakazky srovnatelneho rozsahu za posledni 3 (stavby 5) let.
+    Vraci (skore nebo None, odpoved, ko)."""
+    hod = z.get("predpokladana_hodnota")
+    pozad = z.get("min_obrat")
+    obrat_zadany = (profil.get("obrat_czk") or 0) or None
+    obrat = obrat_zadany or ((kap or {}).get("verejne_trzby_12m") or None)
+    casti, sk, ko = [], [], None
+    if z.get("kvalifikace"):
+        casti.append(f"zadavatel uvádí: {z['kvalifikace'][:220]}")
+    if (pozad or hod) and obrat:
+        nejvic = pozad or 2 * hod  # nejprisnejsi mozny pozadavek
+        typicky = pozad or hod
+        zdroj = "váš obrat" if obrat_zadany else "vaše veřejné tržby za 12 měsíců"
+        if obrat >= nejvic:
+            sk.append(100)
+            casti.append(f"{zdroj} {kc(obrat)} pokryje i nejpřísnější možný požadavek na obrat ({kc(nejvic)})")
+        elif obrat >= typicky:
+            sk.append(70)
+            casti.append(f"{zdroj} {kc(obrat)} nejspíš stačí (požadavek bývá do {kc(nejvic)})")
+        elif obrat >= 0.5 * typicky:
+            sk.append(40)
+            casti.append(f"{zdroj} {kc(obrat)} je na hraně – zvažte konsorcium")
+        else:
+            sk.append(10)
+            casti.append(f"{zdroj} {kc(obrat)} je výrazně pod hodnotou zakázky")
+            if obrat_zadany and not profil.get("consortium_ok"):
+                ko = f"požadovaný obrat (až {kc(nejvic)}) výrazně převyšuje váš obrat {kc(obrat)}"
+    elif (pozad or hod) and not obrat:
+        casti.append("obrat neznáme – doplňte ho v profilu")
+    oddil = (z.get("cpv_hlavni") or "")[:2]
+    refs = ((kap or {}).get("reference") or {}).get(oddil) or []
+    if hod and oddil:
+        srovnatelne = [r for r in refs if r >= 0.5 * hod]
+        sk.append(100 if len(srovnatelne) >= 2 else 70 if srovnatelne else 45 if refs else 25)
+        casti.append(f"srovnatelné reference v oboru za 3 roky: {len(srovnatelne)}"
+                     + (f" (celkem {len(refs)} zakázek, největší {kc(max(refs))})" if refs else " (z veřejných zakázek žádné)"))
+    q = profil.get("qualifications") or []
+    if q:
+        casti.append("v profilu: " + ", ".join(q[:3]))
+    if profil.get("consortium_ok") and sk:
+        sk = [max(s, 50) for s in sk]
+        casti.append("chybějící kvalifikaci můžete doplnit konsorciem/poddodavatelem")
+    skore = round(sum(sk) / len(sk)) if sk else (75 if q else None)
+    casti.append("přesné podmínky ověřte v zadávací dokumentaci")
+    return skore, "; ".join(casti), ko
 
 
 def _konkurence(con):
@@ -790,7 +865,7 @@ def _konkurence(con):
     return out
 
 
-def vhodnost(z, profil, tf, qv, konk, today, klienti=()):
+def vhodnost(z, profil, tf, qv, konk, today, klienti=(), kap=None):
     """Kvalitativni dotaznik: pro kazdou otazku odpoved, skore 0-100 a duvod. KO = vylucujici."""
     kr = []
     ko = []
@@ -892,10 +967,11 @@ def vhodnost(z, profil, tf, qv, konk, today, klienti=()):
     else:
         kr.append({"klic": "konkurence", "otazka": "Jak silná je konkurence?", "odpoved": "málo dat o segmentu", "skore": None})
 
-    # 7 kvalifikace (odpovida uzivatel; predvyplneno z profilu)
-    q = profil.get("qualifications") or []
-    kr.append({"klic": "kvalifikace", "otazka": "Splníme kvalifikaci a máme reference?",
-               "odpoved": ("v profilu: " + ", ".join(q[:3])) if q else "neověřeno – doplňte", "skore": 75 if q else None, "rucne": True})
+    # 7 kvalifikace: obrat a reference z verejnych dat + co zadavatel uvadi + profil
+    sk7, odp7, ko7 = _kvalifikace(z, profil, kap)
+    if ko7:
+        ko.append(ko7)
+    kr.append({"klic": "kvalifikace", "otazka": "Splníme kvalifikaci (obrat, reference)?", "odpoved": odp7, "skore": sk7, "rucne": True})
 
     # dealbreakery: negativni slova
     nz = " " + norm(z.get("nazev")) + " "
@@ -938,10 +1014,11 @@ def zpravodaj(con, profil, today=None, dni=14, limit=30):
                      + [CPV_DIV.get(c[:2], "") for c in profil["cpv_codes"]["main"]])
     qv = tf.vektor(dotaz) if tf else {}
     konk = _konkurence(con)
+    kap = kapacita(con, profil["ico"], today)
     klienti = {r[0] for r in con.execute("SELECT DISTINCT z.zadavatel_ico FROM vitezove v JOIN zakazky z ON z.id=v.zakazka_id WHERE v.dodavatel_ico=?", (profil["ico"],))}
     polozky = []
     for z in kand:
-        v = vhodnost(z, profil, tf, qv, konk, today, klienti)
+        v = vhodnost(z, profil, tf, qv, konk, today, klienti, kap)
         if v["kriteria"][0]["skore"] < 35:  # predmet vubec nesedi -> do zpravodaje nepatri
             continue
         lh = parse_date(z.get("lhuta_nabidek"))
@@ -975,4 +1052,4 @@ def vhodnost_jedne(con, ico, zakazka_id, today=None, vlastnik=""):
     vse = [dict(r) for r in con.execute("SELECT nazev, cpv FROM zakazky ORDER BY datum_zahajeni DESC LIMIT 3000")]
     tf = TfIdf([text_zakazky(x) for x in vse])
     qv = tf.vektor(profil.get("core_capabilities_description") or "")
-    return vhodnost(z, profil, tf, qv, _konkurence(con), today or date.today())
+    return vhodnost(z, profil, tf, qv, _konkurence(con), today or date.today(), kap=kapacita(con, profil["ico"], today))

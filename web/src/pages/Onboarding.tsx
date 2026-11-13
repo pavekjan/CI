@@ -245,6 +245,15 @@ function ProfilCard({ profil, agent, onSave, disabled }: { profil: Profil2; agen
             <input className="field" value={seznamText(p.negative_keywords)} onChange={(e) => set({ negative_keywords: zText(e.target.value) })} />
             <label className="lbl">Kvalifikace a oprávnění</label>
             <input className="field" value={seznamText(p.qualifications)} onChange={(e) => set({ qualifications: zText(e.target.value) })} />
+            <div className="grid g2" style={{ gap: 10 }}>
+              <label><span className="lbl">Roční obrat firmy (Kč)</span>
+                <input className="field" type="number" placeholder="např. 50000000" value={p.obrat_czk ?? ""}
+                  onChange={(e) => set({ obrat_czk: e.target.value ? Number(e.target.value) : null })} /></label>
+              <label className="row" style={{ gap: 8, alignSelf: "end", paddingBottom: 10 }}>
+                <input type="checkbox" checked={!!p.consortium_ok} onChange={(e) => set({ consortium_ok: e.target.checked })} />
+                <span className="small">Půjdeme i do konsorcia / s poddodavatelem</span></label>
+            </div>
+            <p className="small secondary" style={{ margin: "4px 0 0" }}>Obrat slouží k odhadu, zda firma splní kvalifikaci (zadavatel smí chtít nejvýš 2× hodnotu zakázky). Bez něj se počítá s veřejnými tržbami z RVZ a Registru smluv.</p>
           </div>
           <div>
             <div className="grid g3" style={{ gap: 10 }}>
@@ -379,7 +388,7 @@ function ZpravodajCard({ z, profil }: { z: Zpravodaj; profil: Profil2 }) {
                 </div>
                 <div className="row small" style={{ marginTop: 8 }}>
                   <span className="muted">{p.segment}</span>
-                  {p.url && <a href={p.url} target="_blank" rel="noreferrer">Detail zakázky ↗</a>}
+                  {p.url && <a href={p.url} target="_blank" rel="noreferrer" title="Profil zadavatele / NEN – tam je zadávací dokumentace s kvalifikačními podmínkami">Detail a zadávací dokumentace ↗</a>}
                   {p.zadavatel_ico && <a href={`#/trh`} onClick={(e) => { e.preventDefault(); go(`/trh/${encodeURIComponent(p.segment)}`); }}>Trh v segmentu →</a>}
                 </div>
               </div>

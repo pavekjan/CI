@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { adminHeslo, api, nastavAdminHeslo, type AiForm, type Beh, type Nastaveni, type Stav } from "../api";
 import { Card, Kpi } from "../components";
-import { datum, num } from "../format";
+import { datum, mesic, num } from "../format";
 
 export default function Data({ stav, refresh }: { stav: Stav | null; refresh: () => void }) {
   const [beh, setBeh] = useState<Beh | null>(null);
@@ -100,7 +100,7 @@ export default function Data({ stav, refresh }: { stav: Stav | null; refresh: ()
         <div className="grid g4">
           <Kpi label="Zakázek" value={num(stav.zakazek)} note={stav.od ? `${datum(stav.od)} – ${datum(stav.do)}` : "zatím nic"} />
           <Kpi label="Dodavatelů" value={num(stav.dodavatelu)} />
-          <Kpi label="Smluv (Registr smluv)" value={num(stav.smluv)} />
+          <Kpi label="Smluv (Registr smluv)" value={num(stav.smluv)} note={stav.obdobi?.rs_od ? `${mesic(stav.obdobi.rs_od)} – ${mesic(stav.obdobi.rs_do!)}` : undefined} />
           <Kpi label="Profilů z ARES" value={num(stav.firem_ares)} />
         </div>
       )}
@@ -115,6 +115,18 @@ export default function Data({ stav, refresh }: { stav: Stav | null; refresh: ()
         </Card>
       )}
 
+      {stav?.verejne && !stav.demo ? (
+      <Card title="Aktualizace dat" sub="Online verze si data nestahuje sama: server zakázek (ISVZ) cloudové servery neobsluhuje.">
+        <p className="small" style={{ marginTop: 0 }}>
+          Data se aktualizují <b>každé ráno automaticky</b> přes GitHub (záložka Actions → <i>Aktualizace dat</i>), nebo
+          správce na svém počítači spustí <code>aktualizovat_online.bat</code>. Online verze si nová data načte při
+          dalším startu (po uspání, nebo na Renderu <i>Manual Deploy → Restart service</i>).
+        </p>
+        <p className="secondary small" style={{ marginBottom: 0 }}>
+          {stav.do ? <>Zakázky jsou do {datum(stav.do)}. Stát je zveřejňuje po měsících, Registr smluv denně.</> : "Data se právě připravují."}
+        </p>
+      </Card>
+      ) : (
       <Card title="Aktualizace dat" sub="Agenti stáhnou otevřená data státu, vytáhnou z nich zakázky, zkontrolují je a přepočítají index firem.">
         {stav?.demo && <div className="callout" style={{ marginBottom: 12 }}>Běžíte v DEMO režimu: aktualizace jen znovu vygeneruje umělá data. Pro reálná data spusťte aplikaci volbou „Aplikace – reálná data“.</div>}
         <div className="row">
@@ -135,6 +147,7 @@ export default function Data({ stav, refresh }: { stav: Stav | null; refresh: ()
           </div>
         )}
       </Card>
+      )}
 
       {nast && <AiCard key={`${nast.admin}-${nast.ai.poskytovatel}`} nast={nast} onSaved={setNast} />}
 

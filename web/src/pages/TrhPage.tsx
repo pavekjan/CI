@@ -31,7 +31,7 @@ export default function TrhPage({ segment }: { segment: string | null }) {
       </div>
 
       <div className="grid g3">
-        <Kpi label="Zakázek" value={num(t.zakazek)} />
+        <Kpi label="Zakázek" value={num(t.zakazek)} note={segment && t.odhadnuto ? `z toho ${num(t.odhadnuto)} s odhadnutým segmentem (podle názvu)` : undefined} />
         <Kpi label="Předpokládaná hodnota celkem" value={kc(t.hodnota)} />
         <Kpi label="Největší dodavatel" value={<span style={{ fontSize: 18 }}>{t.top[0]?.nazev ?? "–"}</span>} note={t.top[0] ? `${pct(t.top[0].podil)} objemu` : undefined} />
       </div>

@@ -5,6 +5,7 @@ import {
 import { api, type ExportVysledek, type Profil } from "../api";
 import { BarList, Card, ChartTip, Kpi, Loading, go } from "../components";
 import { datum, kc, kcAxis, mesic, num, pct } from "../format";
+import GrafCard from "./Graf";
 
 type Metrika = "vyhry" | "objem" | "ucasti";
 
@@ -98,7 +99,7 @@ export default function Firma({ ico, prazdnaDb }: { ico: string; prazdnaDb?: boo
         prazdnaDb ? (
         <div className="card empty">
           <p><b>Databáze zakázek je zatím prázdná – nejdřív je potřeba stáhnout data.</b></p>
-          <p>Otevřete záložku <a href="#/data">Data</a> a klikněte na <b>Rychlá aktualizace</b>. Až se objeví „✓ hotovo“, vraťte se sem.</p>
+          <p>Na záložce <a href="#/data">Data</a> je popsané, jak data stáhnout (na vlastním počítači tlačítkem <b>Rychlá aktualizace</b>).</p>
           <p><a className="btn primary" href="#/data">Přejít na Data</a></p>
         </div>
         ) : (
@@ -130,9 +131,20 @@ export default function Firma({ ico, prazdnaDb }: { ico: string; prazdnaDb?: boo
             </div>
           </Card>
 
+          {/* odkud data jsou */}
+          <div className="callout info small">
+            <b>Dva zdroje, dvě čísla.</b>{" "}
+            <b>Soutěže (RVZ)</b>{p.obdobi?.rvz_od ? <> za {mesic(p.obdobi.rvz_od)} – {mesic(p.obdobi.rvz_do!)}</> : null}: větší zakázky vypsané ve
+            věstníku a na NEN. <b>Registr smluv</b>{p.obdobi?.rs_od ? <> za {mesic(p.obdobi.rs_od)} – {mesic(p.obdobi.rs_do!)}</> : null}: všechny
+            zveřejněné smlouvy nad 50 tis. Kč, tedy i malé zakázky a objednávky (např. z e-shopů), které v RVZ nejsou.{" "}
+            {p.hlidac && <a href={p.hlidac.url} target="_blank" rel="noreferrer">
+              {p.hlidac.pocet !== null ? <>Hlídač státu: {num(p.hlidac.pocet)} smluv za celou historii ↗</> : <>Ověřit na Hlídači státu ↗</>}
+            </a>}
+          </div>
+
           {/* KPI */}
           <div className="grid g4">
-            <Kpi label="Vyhrané zakázky" value={num(k.vyhry)} note={`${num(k.ucasti)} účastí celkem`} />
+            <Kpi label="Vyhrané soutěže (RVZ)" value={num(k.vyhry)} note={`${num(k.ucasti)} účastí celkem`} />
             <Kpi label="Win rate" value={pct(k.win_rate)} note={k.win_rate === null ? "zdroj neuvádí neúspěšné nabídky" : `ze ${num(k.ucasti_zname)} soutěží se známými účastníky`} />
             <Kpi label="Objem výher (bez DPH)" value={kc(k.objem)} note={`medián zakázky ${kc(k.median_cena)}`} />
             <Kpi label="Cena vs. předpokládaná hodnota" value={pct(k.median_pomer)} note={`trh ve stejných segmentech ${pct(k.trh_median_pomer)}`} />
@@ -140,9 +152,34 @@ export default function Firma({ ico, prazdnaDb }: { ico: string; prazdnaDb?: boo
           <div className="grid g4">
             <Kpi label="Zákazníků (zadavatelů)" value={num(k.klientu)} />
             <Kpi label="Ø nabídek v soutěžích, které vyhrála" value={num(k.prumer_nabidek, 1)} note={k.s_poctem_nabidek ? `${k.jedna_nabidka}× byla jediným uchazečem` : undefined} />
-            <Kpi label="Smlouvy v Registru smluv" value={num(k.smluv_rs)} note={kc(k.objem_rs)} />
+            <Kpi label="Smlouvy v Registru smluv" value={num(Math.max(k.smluv_rs_souhrn ?? 0, k.smluv_rs))}
+              note={`${kc(Math.max(k.objem_rs_souhrn ?? 0, k.objem_rs))}${p.registr ? ` · ${num(p.registr.zadavatelu)} odběratelů` : ""}`} />
             <Kpi label="Výhry ověřené v Registru smluv" value={k.vyhry ? pct(k.overeno_rs / k.vyhry) : "–"} note={`${k.overeno_rs} z ${k.vyhry} (křížová kontrola)`} />
           </div>
+
+          {p.registr && p.registr.pocet > 0 && (
+            <div className="grid g2">
+              <Card title="Smlouvy z Registru smluv po měsících" sub="Počet zveřejněných smluv podle data uzavření (včetně malých zakázek mimo RVZ).">
+                <div style={{ height: 220 }}>
+                  <ResponsiveContainer>
+                    <BarChart data={p.registr.mesice} margin={{ top: 8, right: 8, left: 0, bottom: 0 }} barCategoryGap="22%">
+                      <CartesianGrid vertical={false} strokeDasharray="0" />
+                      <XAxis dataKey="mesic" tickFormatter={mesic} tickLine={false} axisLine={false} />
+                      <YAxis tickLine={false} axisLine={false} width={50} allowDecimals={false} />
+                      <Tooltip cursor={{ fill: "var(--surface-2)" }} content={({ active, payload }) => (active && payload?.length
+                        ? <ChartTip title={mesic(String(payload[0].payload.mesic))} rows={[`${num(payload[0].payload.pocet)} smluv`, kc(payload[0].payload.objem)]} /> : null)} />
+                      <Bar dataKey="pocet" fill="var(--series-2, var(--series-1))" radius={[4, 4, 0, 0]} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              </Card>
+              <Card title="Odběratelé podle Registru smluv" sub="Veřejní zadavatelé podle objemu smluv (bez DPH).">
+                <BarList items={p.registr.odberatele} value={(c) => c.objem} label={(c) => c.nazev} right={(c) => <>{kc(c.objem)} · {num(c.pocet)}×</>} />
+              </Card>
+            </div>
+          )}
+
+          <GrafCard ico={p.ico} />
 
           {/* vyvoj */}
           <Card

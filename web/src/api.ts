@@ -1,5 +1,17 @@
 // Typy a volani backendu (server.py)
 
+export interface GrafUzel { id: string; typ: "firma" | "obor" | "zadavatel" | "konkurent" | "zakazka" | "zdroj"; nazev: string; odkaz: string | null; vaha: number; info: string | null }
+export interface Graf { ico: string; nazev: string; uzly: GrafUzel[]; hrany: { od: string; do: string; typ: string; popis: string | null }[] }
+
+export interface Obdobi {
+  rvz_od: string | null;
+  rvz_do: string | null;
+  rvz_mesicu: number;
+  rs_od: string | null;
+  rs_do: string | null;
+  rs_mesicu: number;
+}
+
 export interface Stav {
   demo: boolean;
   zakazek: number;
@@ -11,6 +23,8 @@ export interface Stav {
   do: string | null;
   posledni_aktualizace: string | null;
   aktualizace_bezi: boolean;
+  verejne?: boolean;
+  obdobi?: Obdobi;
 }
 
 export interface Hit {
@@ -57,8 +71,19 @@ export interface Profil {
     s_poctem_nabidek: number;
     smluv_rs: number;
     objem_rs: number;
+    smluv_rs_souhrn?: number;
+    objem_rs_souhrn?: number;
     overeno_rs: number;
   };
+  registr?: {
+    pocet: number;
+    objem: number;
+    zadavatelu: number;
+    mesice: { mesic: string; pocet: number; objem: number }[];
+    odberatele: { ico: string; nazev: string; pocet: number; objem: number }[];
+  } | null;
+  obdobi?: Obdobi;
+  hlidac?: { url: string; pocet: number | null };
   skore: { celkem: number | null; hodnoceni: string | null; slozky: Slozka[] };
   mesice: { mesic: string; vyhry: number; objem: number; ucasti: number }[];
   segmenty: {
@@ -101,7 +126,8 @@ export interface Trh {
   hodnota: number;
   mesice: { mesic: string; pocet: number }[];
   kraje: { kraj: string; pocet: number }[];
-  segmenty: { segment: string; pocet: number }[];
+  segmenty: { segment: string; pocet: number; odhad?: number }[];
+  odhadnuto?: number;
   top: { ico: string; nazev: string; vyhry: number; objem: number; podil: number }[];
 }
 
@@ -157,7 +183,7 @@ export interface Profil2 {
   keywords: string[]; negative_keywords: string[]; regions_nuts3: string[];
   max_distance_km: number | null; cooperation_model: string | null;
   budget: { min_czk: number | null; max_czk: number | null; vzmr_interest: boolean };
-  min_prep_days: number; qualifications: string[]; consortium_ok: boolean; dealbreakers: string[];
+  min_prep_days: number; qualifications: string[]; consortium_ok: boolean; dealbreakers: string[]; obrat_czk?: number | null;
   whitelist_procurer_icos: string[]; blacklist_procurer_icos: string[];
   sidlo?: Sidlo;
 }
@@ -231,6 +257,7 @@ export const api = {
   stav: () => get<Stav>("/api/stav"),
   hledat: (q: string) => get<Hit[]>(`/api/hledat?q=${encodeURIComponent(q)}`),
   firma: (ico: string) => get<Profil>(`/api/firma/${encodeURIComponent(ico)}`),
+  graf: (ico: string) => get<Graf>(`/api/graf/${encodeURIComponent(ico)}`),
   trh: (segment?: string | null) => get<Trh>(`/api/trh${segment ? `?segment=${encodeURIComponent(segment)}` : ""}`),
   beh: () => get<Beh>("/api/beh"),
   nastaveni: () => get<Nastaveni>("/api/nastaveni"),

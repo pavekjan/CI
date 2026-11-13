@@ -206,6 +206,30 @@ Register-ScheduledTask -TaskName "TenderScope data" -Action $a -Trigger (New-Sch
 ```
 (Počítač musí být v tu dobu zapnutý. Zrušení: `Unregister-ScheduledTask -TaskName "TenderScope data"`.)
 
+**Kolik dat se stahuje:** zakázky (RVZ) za 12 měsíců a Registr smluv za 36 měsíců. Z Registru smluv se
+u starších měsíců ukládá jen souhrn po firmách (počet a objem smluv po měsících a hlavní odběratelé), celé
+smlouvy jen za poslední 3 měsíce – jinak by se databáze na bezplatný server nevešla. **První spuštění trvá
+dlouho** (stahují se desítky GB, počítejte s několika hodinami), další běhy jen doplní nové měsíce.
+
+**Proč má firma v soutěžích (RVZ) málo výher:** v RVZ jsou hlavně větší soutěže. Malé zakázky a objednávky
+(typicky e-shopy jako Alza) tam nejsou, ale jsou v Registru smluv. Profil firmy proto ukazuje obojí zvlášť
+a u každého zdroje období. S tokenem Hlídače státu (`HLIDAC_TOKEN`, zdarma) ukáže i počet smluv za celou historii.
+
+**Segment „neuvedeno“:** asi 70 % záznamů RVZ nemá vyplněné CPV. Aplikace segment odhadne podle názvu
+zakázky (model se učí ze zakázek, které CPV mají; přesnost kolem 93 %) a označí ho jako *odhad*. Zbytek
+může volitelně zařadit AI (`aktualizovat_online.bat` ji použije, když je na stránce Data nastavená; posílá
+se jen veřejný název a druh zakázky).
+
+**Kvalifikace (obrat, reference):** zadávací dokumentace není v otevřených datech strojově dostupná, proto
+zpravodaj kvalifikaci odhaduje: zadavatel smí požadovat obrat nejvýš 2× předpokládanou hodnotu (ZZVZ § 78),
+obrat firmy se bere z profilu (pole *Roční obrat*), jinak z veřejných tržeb (RVZ + Registr smluv za 12 měsíců),
+a reference = vyhrané zakázky ve stejném oboru za 3 roky. Pokud zdroj podmínky účasti uvádí, ukážou se.
+Zakázky, na které firma zjevně nedosáhne, dostanou verdikt *nevhodné*. Přesné podmínky vždy ověřte v dokumentaci
+(odkaz *Detail a zadávací dokumentace*).
+
+**Knowledge graph:** v profilu každé firmy je interaktivní graf (zákazníci, konkurenti, obory, zakázky, zdroje).
+Kliknutím uzel otevřete, tažením ho posunete. Export do Obsidianu zůstává.
+
 **Jak čerstvá data vůbec jsou:** zakázky (open data ISVZ/RVZ) zveřejňuje stát po **měsících**. Soubor za
 uplynulý měsíc vychází během následujícího měsíce a poslední měsíce se ještě doplňují, takže zakázky jsou
 typicky do konce minulého měsíce. **Registr smluv** se doplňuje **denně** (smlouvy do včerejška).

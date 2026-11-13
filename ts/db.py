@@ -60,6 +60,14 @@ CREATE TABLE IF NOT EXISTS smlouvy_strany (
     nazev TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_strany_ico ON smlouvy_strany(ico);
+-- Registr smluv za dlouhe obdobi jen jako souhrn (cele smlouvy by se na bezplatny server nevesly).
+-- dump = mesicni soubor registru (napr. 2025_03); pri novem zpracovani se jeho radky nahradi.
+CREATE TABLE IF NOT EXISTS smlouvy_souhrn (ico TEXT, mesic TEXT, dump TEXT, pocet INTEGER, hodnota REAL, PRIMARY KEY (ico, mesic, dump));
+CREATE TABLE IF NOT EXISTS smlouvy_odberatele (ico TEXT, zadavatel_ico TEXT, dump TEXT, pocet INTEGER, hodnota REAL,
+    PRIMARY KEY (ico, zadavatel_ico, dump));
+CREATE TABLE IF NOT EXISTS subjekty (ico TEXT PRIMARY KEY, nazev TEXT);
+CREATE INDEX IF NOT EXISTS ix_rss_dump ON smlouvy_souhrn(dump);
+CREATE INDEX IF NOT EXISTS ix_rso_dump ON smlouvy_odberatele(dump);
 CREATE INDEX IF NOT EXISTS ix_vit_ico ON vitezove(dodavatel_ico);
 CREATE INDEX IF NOT EXISTS ix_uc_ico ON ucastnici(dodavatel_ico);
 CREATE INDEX IF NOT EXISTS ix_uc_zak ON ucastnici(zakazka_id);
@@ -123,4 +131,11 @@ def connect(path=None):
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA journal_mode=WAL")  # aplikace muze cist, zatimco agenti zapisuji
     con.executescript(SCHEMA)
+    sloupce = {r[1] for r in con.execute("PRAGMA table_info(zakazky)")}
+    for sl in ("kvalifikace TEXT", "min_obrat REAL"):  # podminky ucasti, pokud je zdroj uvadi (extractor)
+        if sl.split()[0] not in sloupce:
+            con.execute(f"ALTER TABLE zakazky ADD COLUMN {sl}")  # nosec B608 - konstanta z kodu
+    if "cpv_odhad" not in sloupce:  # odhad segmentu u zakazek bez CPV ("slova" / "ai"), viz ts/segmenty.py
+        con.execute("ALTER TABLE zakazky ADD COLUMN cpv_odhad TEXT")
+        con.commit()
     return con

@@ -8,6 +8,7 @@ Frontend (TypeScript/React) je predkompilovany ve web/dist. API:
     GET  /api/stav                 stav databaze
     GET  /api/hledat?q=...         hledani firmy (nazev nebo IČO)
     GET  /api/firma/<ico>          profil konkurenceschopnosti
+    GET  /api/graf/<ico>           knowledge graph firmy (uzly a hrany)
     GET  /api/trh?segment=...      prehled trhu
     POST /api/aktualizovat         {"rezim": "rychle" | "plny"} - spusti agenty na pozadi
     GET  /api/beh                  prubeh aktualizace (log)
@@ -246,6 +247,18 @@ def _sink(line):
 LOG_SINKS.append(_sink)
 
 
+def _ai_pro_segmenty():
+    """AI pro odhad segmentu jen lokalne a jen kdyz je nastavena (aktualizovat_db.py --ai). Na online verzi nikdy."""
+    from ts import llm, segmenty
+    if SEC["verejne"] or not STATE.get("ai_segmenty"):
+        return None
+    n = llm.nastaveni(STATE["cfg"])
+    if not n:
+        log("Segmenty", "AI neni nastavena -> zbytek zustane neuvedeno (nastaveni AI je na strance Data)")
+        return None
+    return segmenty.ai_klasifikator(n, api.CPV_DIV)
+
+
 def run_update(rezim):
     try:
         if STATE["demo"]:
@@ -256,11 +269,13 @@ def run_update(rezim):
             cfg = dict(STATE["cfg"])
             cfg["obor"] = "vse"
             if rezim == "rychle":
-                cfg.update({"mesice": 3, "smlouvy_mesice": 0, "ares_max_firem": 30})
-            elif rezim == "denni":  # kazdodenni doplneni: posledni mesice zakazek + aktualni mesic Registru smluv
-                cfg.update({"mesice": 3, "smlouvy_mesice": 1, "ares_max_firem": 40})
+                cfg.update({"mesice": 3, "smlouvy_mesice": 0, "smlouvy_souhrn_mesice": 0, "ares_max_firem": 30})
             else:
-                cfg.update({"mesice": cfg.get("mesice", 12), "smlouvy_mesice": cfg.get("smlouvy_mesice", 3), "ares_max_firem": 100})
+                # plna i denni: 12 mesicu zakazek, Registr smluv 3 mesice v detailu a 36 mesicu v souhrnu.
+                # Hotove mesice se preskakuji bez stahovani, takze dalsi behy doplni jen nove mesice.
+                cfg.update({"mesice": cfg.get("mesice", 12), "smlouvy_mesice": cfg.get("smlouvy_mesice", 3),
+                            "smlouvy_souhrn_mesice": cfg.get("smlouvy_souhrn_mesice", 36),
+                            "ares_max_firem": 100 if rezim == "plny" else 40})
             con = connect(STATE["db"])
             from ts.orchestrator import _step
             stats = {}
@@ -268,6 +283,9 @@ def run_update(rezim):
             _step(con, "Scout: Registr smluv", scout.scout_smlouvy, stats, con, cfg)
             _step(con, "Scout: ARES", scout.scout_ares, stats, con, cfg)
             _step(con, "Verifier", verifier.run, stats, con)
+            from ts import segmenty
+            _step(con, "Segmenty: odhad u zakazek bez CPV", segmenty.klasifikuj, stats, con, _ai_pro_segmenty(),
+                  int(STATE.get("ai_segmenty") or 0) or 400)
             _step(con, "Indexer", api.rebuild_index, stats, con)
             con.close()
         log("Orchestrator", "HOTOVO - data jsou aktualni")
@@ -555,9 +573,11 @@ class Handler(BaseHTTPRequestHandler):
         con = connect(STATE["db"])
         try:
             if u.path == "/api/stav":
-                return self._json({**api.stav(con, STATE["demo"]), "aktualizace_bezi": JOB["bezi"]})
+                return self._json({**api.stav(con, STATE["demo"]), "aktualizace_bezi": JOB["bezi"], "verejne": SEC["verejne"]})
             if u.path == "/api/hledat":
                 return self._json(api.hledat(con, arg("q", 100), None if STATE["demo"] else STATE["cfg"]["zdroje"]["ares_base"]))
+            if u.path.startswith("/api/graf/"):
+                return self._json(api.graf(con, _ico_z_cesty(u.path), STATE["cfg"]))
             if u.path.startswith("/api/firma/"):
                 return self._json(api.profil(con, _ico_z_cesty(u.path), STATE["cfg"], online=not STATE["demo"]))
             if u.path == "/api/trh":

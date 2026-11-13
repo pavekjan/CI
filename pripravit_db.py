@@ -51,8 +51,26 @@ def main():
     src.close()
     con = sqlite3.connect(TMP)
     con.execute("DELETE FROM zpravy")
-    kroky = [("bez Registru smluv", lambda: (con.execute("DELETE FROM smlouvy_strany"), con.execute("DELETE FROM smlouvy")))]
-    kroky += [(f"jen zakazky za poslednich {m} mesicu", (lambda m=m: smaz_stare(con, m))) for m in (12, 6, 3)]
+    # Co se z kopie vynecha, to se v ni oznaci jako nezpracovane, aby ho dalsi aktualizace (GitHub Actions
+    # zacina z teto kopie) zase doplnila a nic se tise neztratilo.
+    def bez_detailu_smluv():
+        con.execute("DELETE FROM smlouvy_strany")
+        con.execute("DELETE FROM smlouvy")
+        con.execute("UPDATE soubory SET podpis='s:' || substr(podpis, 3) WHERE klic LIKE 'rs2:%' AND podpis LIKE 'd:%'")
+
+    def souhrn_jen(mesicu):
+        con.execute("DELETE FROM smlouvy_souhrn WHERE mesic < strftime('%Y-%m', 'now', ?)", (f"-{mesicu} months",))
+        con.execute("DELETE FROM soubory WHERE klic LIKE 'rs2:%' AND substr(klic, 5, 4) || '-' || substr(klic, 10, 2) < "
+                    "strftime('%Y-%m', 'now', ?)", (f"-{mesicu} months",))
+        con.execute("DELETE FROM smlouvy_odberatele WHERE dump NOT IN (SELECT substr(klic, 5) FROM soubory WHERE klic LIKE 'rs2:%')")
+
+    def zakazky_jen(mesicu):
+        smaz_stare(con, mesicu)
+        con.execute("DELETE FROM soubory WHERE klic LIKE 'rvz:%'")
+
+    kroky = [("bez detailu Registru smluv (souhrn zustava)", bez_detailu_smluv),
+             ("souhrn Registru smluv jen za 24 mesicu", lambda: souhrn_jen(24))]
+    kroky += [(f"jen zakazky za poslednich {m} mesicu", (lambda m=m: zakazky_jen(m))) for m in (12, 6, 3)]
     popis = "cela databaze"
     while True:
         con.commit()

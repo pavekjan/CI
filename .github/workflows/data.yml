@@ -19,7 +19,7 @@ concurrency:
 jobs:
   data:
     runs-on: ubuntu-latest
-    timeout-minutes: 150
+    timeout-minutes: 300
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -31,7 +31,9 @@ jobs:
       - name: Stahnout data (zakazky, Registr smluv, ARES)
         env:
           HLIDAC_TOKEN: ${{ secrets.HLIDAC_TOKEN }}
-        run: python aktualizovat_db.py --plny
+          REPO: ${{ github.repository }}
+        # zacina z posledni databaze ve vetvi data, takze se stahuji a zpracovavaji jen nove mesice
+        run: python aktualizovat_db.py --z-url "https://raw.githubusercontent.com/${REPO}/data/tenderscope.db.gz"
       - name: Zabalit databazi
         run: python pripravit_db.py --limit 95
       - name: Nahrat do vetve data

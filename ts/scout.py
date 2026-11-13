@@ -8,6 +8,7 @@ Detekuje nove zakazky (porovnani s databazi) a preda je Extractoru.
 """
 import os
 import time
+from collections import Counter, defaultdict
 from datetime import date, datetime
 
 from . import extractor
@@ -27,6 +28,8 @@ def _save_zakazka(con, zak, vit, uc):
     if old:
         old = dict(old)
         zak = {k: (v if v not in (None, "", "neuvedeno") else old.get(k)) for k, v in zak.items()}
+        if old.get("cpv_odhad") and zak.get("cpv_hlavni") == old.get("cpv_hlavni"):
+            zak["cpv_odhad"] = old["cpv_odhad"]  # odhad segmentu zustava, dokud neprijde skutecne CPV
     cols = list(zak.keys()) + ["stazeno"]
     con.execute(f"INSERT OR REPLACE INTO zakazky ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
                 [zak[c] for c in zak] + [now])
@@ -88,6 +91,9 @@ def scout_rvz(con, cfg, today=None):
     for i, (y, m) in enumerate(months):
         if (y, m) < (2024, 2):
             continue
+        if i < len(months) - 3 and con.execute("SELECT 1 FROM soubory WHERE klic=?", (
+                f"rvz:rvz_VZ-{m:02d}-{y}.zip:{cfg['obor']}:{nase or ''}:x{extractor.EXTRACTOR_VERZE}",)).fetchone():
+            continue  # starsi mesic uz je zpracovany a MMR ho uz nemeni -> ani nestahovat
         try:
             path = rvz.fetch_month(base, y, m, current=i >= len(months) - 3)
         except Exception as e:
@@ -166,24 +172,40 @@ def scout_hlidac(con, cfg):
     return {"zaznamu": len(res), "novych": new}
 
 
+def _hodnota_smlouvy(s):
+    if s["hodnota_bez_dph"]:
+        return s["hodnota_bez_dph"]
+    return (s["hodnota_s_dph"] or 0) / 1.21
+
+
 def scout_smlouvy(con, cfg):
-    """Registr smluv: posledni N mesicu dumpu, ulozi smlouvy relevantni pro obor
-    nebo uzavrene se znamymi dodavateli (ICO vitezu z RVZ)."""
+    """Registr smluv po mesicnich souborech (dumpech).
+    - souhrn za `smlouvy_souhrn_mesice` mesicu (vychozi 36): u kazde firmy pocet a objem smluv po mesicich
+      a s kym je uzavrela. Pokryva i male zakazky a objednavky, ktere v RVZ nejsou (napr. e-shopy).
+    - cele smlouvy (predmet, odkaz) jen za poslednich `smlouvy_mesice` mesicu (overeni vitezu, detail).
+    Hotove mesice se zpracuji jednou a pak se preskakuji, i bez stazeni souboru."""
     base = cfg["zdroje"]["smlouvy_base"]
     obor = cfg["obory"][cfg["obor"]]
     kws = [" " + norm(k) + " " if len(norm(k)) <= 6 else norm(k) for k in obor["klicova_slova"]]
     icos = {r[0] for r in con.execute("SELECT DISTINCT dodavatel_ico FROM vitezove WHERE dodavatel_ico IS NOT NULL")}
     if cfg.get("nase_ico"):
         icos.add(cfg["nase_ico"])
-    pocet = int(cfg.get("smlouvy_mesice", 3) or 0)
-    if pocet <= 0:
+    detail_n = int(cfg.get("smlouvy_mesice", 3) or 0)
+    souhrn_n = max(int(cfg.get("smlouvy_souhrn_mesice", 0) or 0), detail_n)
+    if souhrn_n <= 0:
         log(A, "Registr smluv: vypnuto (smlouvy_mesice = 0) -> preskakuji")
         return {"preskoceno": True}
     dumps = smlouvy.fetch_index(base)
     dumps.sort(key=lambda d: (d["rok"], d["mesic"]))
-    dumps = dumps[-pocet:]
-    total = 0
-    for d in dumps:
+    dumps = dumps[-souhrn_n:]
+    total = smluv = 0
+    for i, d in enumerate(dumps):
+        dump_id = f"{d['rok']}_{d['mesic']:02d}"
+        detail = i >= len(dumps) - detail_n
+        klic = f"rs2:{dump_id}"
+        row = con.execute("SELECT podpis FROM soubory WHERE klic=?", (klic,)).fetchone()
+        if d["dokonceny"] and row and (row[0].startswith("d:") or not detail):
+            continue  # hotovy mesic uz je zpracovany -> nestahovat znovu
         try:
             path = smlouvy.fetch_dump(d)
         except Exception as e:
@@ -191,14 +213,33 @@ def scout_smlouvy(con, cfg):
             continue
         if not path:
             continue
-        klic = f"rs:{os.path.basename(path)}:{cfg['obor']}:{len(icos)}"
-        if _uz_zpracovano(con, klic, path):
+        podpis = ("d:" if detail else "s:") + _podpis(path)
+        if row and row[0] == podpis:
             log(A, f"Registr smluv {d['mesic']:02d}/{d['rok']}: beze zmeny od minula -> preskakuji")
             continue
+        souhrn, odber, nazvy = Counter(), Counter(), {}
+        hodn, hodn_o = defaultdict(float), defaultdict(float)
         n = rel = 0
+        t_log = time.time()
         for s in smlouvy.iter_smlouvy(path):
             n += 1
-            if not s["id"] or (cfg["obor"] != "vse" and not smlouvy.is_relevant(s, kws, icos)):
+            if n % 5000 == 0 and time.time() - t_log >= 5:
+                t_log = time.time()
+                log(A, f"  Registr smluv {d['mesic']:02d}/{d['rok']}: zpracovano {n} smluv")
+            h = _hodnota_smlouvy(s)
+            mesic = (s["datum_uzavreni"] or "")[:7] or f"{d['rok']}-{d['mesic']:02d}"
+            zad = s["zadavatel_ico"]
+            if zad and s["zadavatel_nazev"]:
+                nazvy[zad] = s["zadavatel_nazev"]
+            for st in {x["ico"]: x for x in s["strany"] if x["ico"] and x["ico"] != zad}.values():
+                souhrn[(st["ico"], mesic)] += 1
+                hodn[(st["ico"], mesic)] += h
+                if st["nazev"]:
+                    nazvy[st["ico"]] = st["nazev"]
+                if zad:
+                    odber[(st["ico"], zad)] += 1
+                    hodn_o[(st["ico"], zad)] += h
+            if not detail or not s["id"] or (cfg["obor"] != "vse" and not smlouvy.is_relevant(s, kws, icos)):
                 continue
             rel += 1
             con.execute("INSERT OR REPLACE INTO smlouvy (id, predmet, datum_uzavreni, hodnota_bez_dph, hodnota_s_dph, "
@@ -208,11 +249,20 @@ def scout_smlouvy(con, cfg):
             con.execute("DELETE FROM smlouvy_strany WHERE smlouva_id=?", (s["id"],))
             for st in s["strany"]:
                 con.execute("INSERT INTO smlouvy_strany VALUES (?,?,?)", (s["id"], st["ico"], st["nazev"]))
+        con.execute("DELETE FROM smlouvy_souhrn WHERE dump=?", (dump_id,))
+        con.execute("DELETE FROM smlouvy_odberatele WHERE dump=?", (dump_id,))
+        con.executemany("INSERT INTO smlouvy_souhrn VALUES (?,?,?,?,?)",
+                        [(ico, m, dump_id, c, hodn[(ico, m)]) for (ico, m), c in souhrn.items()])
+        con.executemany("INSERT INTO smlouvy_odberatele VALUES (?,?,?,?,?)",
+                        [(ico, z, dump_id, c, hodn_o[(ico, z)]) for (ico, z), c in odber.items()])
+        con.executemany("INSERT OR REPLACE INTO subjekty VALUES (?,?)", list(nazvy.items()))
         con.commit()
-        _oznac_zpracovano(con, klic, path)
+        con.execute("INSERT OR REPLACE INTO soubory VALUES (?,?)", (klic, podpis))
+        con.commit()
         total += rel
-        log(A, f"Registr smluv {d['mesic']:02d}/{d['rok']}: {n} smluv, {rel} relevantnich")
-    return {"relevantnich_smluv": total}
+        smluv += n
+        log(A, f"Registr smluv {d['mesic']:02d}/{d['rok']}: {n} smluv" + (f", {rel} ulozeno v detailu" if detail else " (souhrn)"))
+    return {"smluv": smluv, "detail": total}
 
 
 def scout_ares(con, cfg):

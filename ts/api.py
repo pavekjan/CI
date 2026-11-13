@@ -5,7 +5,8 @@ ARES a zpravy se pro otevrenou firmu dotahuji zivě (s cache)."""
 import re
 import statistics
 from collections import Counter, defaultdict
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from urllib.parse import quote
 
 CPV_DIV = {
     "03": "Zemědělské a lesnické produkty", "09": "Paliva a energie", "14": "Těžba a kovy", "15": "Potraviny a nápoje",
@@ -114,6 +115,11 @@ def rebuild_index(con):
         r["zname"] = r["ucasti"] & z_uc
     for ico, nazev, n in con.execute("SELECT ico, MAX(nazev), COUNT(DISTINCT smlouva_id) FROM smlouvy_strany WHERE ico IS NOT NULL GROUP BY ico"):
         row(ico, nazev)["smluv"] = n
+    # souhrn Registru smluv (36 mesicu): i firmy, ktere v RVZ nic nevyhraly (male zakazky, e-shopy)
+    nazvy = dict(con.execute("SELECT ico, nazev FROM subjekty"))
+    for ico, n in con.execute("SELECT ico, SUM(pocet) FROM smlouvy_souhrn GROUP BY ico HAVING SUM(pocet) >= 3"):
+        r = row(ico, nazvy.get(ico))
+        r["smluv"] = max(r["smluv"], n)
     for ico, nazev in con.execute("SELECT ico, nazev FROM firmy"):
         if ico in agg and nazev:
             agg[ico]["nazev"] = nazev
@@ -127,16 +133,84 @@ def rebuild_index(con):
 
 
 # ---------------------------------------------------------------- stav dat
+def rozsah_dat(con):
+    """Obdobi, ktere data pokryvaji. Nekolik zakazek ma datum zahajeni o roky drive (dlouhe ramcove smlouvy,
+    preklepy), proto se zacatek bere jako 1. percentil, ne minimum. Konec nesmi byt v budoucnosti."""
+    pl = "datum_zahajeni >= '2000' AND datum_zahajeni <= date('now', '+1 day')"
+    n = con.execute(f"SELECT COUNT(*) FROM zakazky WHERE {pl}").fetchone()[0]  # nosec B608 - pl je konstanta
+    if not n:
+        return (None, None)
+    od = con.execute(f"SELECT datum_zahajeni FROM zakazky WHERE {pl} ORDER BY datum_zahajeni LIMIT 1 OFFSET ?",  # nosec B608
+                     (n // 100,)).fetchone()[0]
+    do = con.execute(f"SELECT MAX(datum_zahajeni) FROM zakazky WHERE {pl}").fetchone()[0]  # nosec B608
+    return (od, do)
+
+
+def obdobi(con):
+    """Za jake obdobi data jsou: RVZ = zpracovane mesicni soubory, Registr smluv = zpracovane mesice registru."""
+    rvz = sorted(f"{k[-4:]}-{k[-7:-5]}" for (k,) in con.execute(
+        "SELECT DISTINCT substr(klic, 5, instr(substr(klic, 5), '.zip') - 1) FROM soubory WHERE klic LIKE 'rvz:rvz_VZ-%'"))
+    rs = sorted(k[4:8] + "-" + k[9:11] for (k,) in con.execute("SELECT klic FROM soubory WHERE klic LIKE 'rs2:%'"))
+    return {"rvz_od": rvz[0] if rvz else None, "rvz_do": rvz[-1] if rvz else None, "rvz_mesicu": len(rvz),
+            "rs_od": rs[0] if rs else None, "rs_do": rs[-1] if rs else None, "rs_mesicu": len(rs)}
+
+
+def rs_firmy(con, ico, mesicu=36):
+    """Registr smluv pro jednu firmu ze souhrnu: pocet a objem smluv, po mesicich a podle odberatelu."""
+    mes = con.execute("SELECT mesic, SUM(pocet), SUM(hodnota) FROM smlouvy_souhrn WHERE ico=? GROUP BY mesic ORDER BY mesic",
+                      (ico,)).fetchall()
+    if not mes:
+        return None
+    odb = con.execute("""SELECT o.zadavatel_ico, COALESCE(MAX(s.nazev), o.zadavatel_ico), SUM(o.pocet), SUM(o.hodnota)
+                         FROM smlouvy_odberatele o LEFT JOIN subjekty s ON s.ico=o.zadavatel_ico WHERE o.ico=?
+                         GROUP BY o.zadavatel_ico ORDER BY SUM(o.hodnota) DESC LIMIT 12""", (ico,)).fetchall()
+    od = (date.today().replace(day=1) - timedelta(days=31 * mesicu)).isoformat()[:7]
+    return {"pocet": sum(r[1] for r in mes), "objem": sum(r[2] or 0 for r in mes),
+            "zadavatelu": con.execute("SELECT COUNT(DISTINCT zadavatel_ico) FROM smlouvy_odberatele WHERE ico=?", (ico,)).fetchone()[0],
+            "mesice": [{"mesic": m, "pocet": n, "objem": h or 0} for m, n, h in mes if m >= od],
+            "odberatele": [{"ico": i, "nazev": n, "pocet": c, "objem": h or 0} for i, n, c, h in odb]}
+
+
+_HLIDAC_CACHE = {}
+
+
+def hlidac_smlouvy(cfg, ico, online=True):
+    """Celkovy pocet smluv firmy v Registru smluv za celou historii podle Hlidace statu (token zdarma).
+    Odkaz funguje i bez tokenu. Vysledek se drzi 24 h v pameti."""
+    url = f"https://www.hlidacstatu.cz/hledat?Q=ico%3A{ico}"
+    token = cfg.get("hlidac_token")
+    if not token or not online:
+        return {"url": url, "pocet": None}
+    hit = _HLIDAC_CACHE.get(ico)
+    if hit and hit[0] > datetime.now() - timedelta(hours=24):
+        return hit[1]
+    out = {"url": url, "pocet": None}
+    try:
+        r = http_get(cfg["zdroje"]["hlidac_base"] + "smlouvy/hledat", params={"dotaz": f"ico:{ico}", "strana": 1},
+                     headers={"Authorization": f"Token {token}"}, timeout=10, retries=1)
+        if r.status_code == 200:
+            d = r.json()
+            n = d.get("total", d.get("Total"))
+            out["pocet"] = int(n) if isinstance(n, (int, float)) else None
+    except Exception as e:  # doplnek: pri chybe profil funguje dal
+        log(A, f"Hlidac statu {ico}: {str(e)[:120]}")
+    if len(_HLIDAC_CACHE) > 2000:
+        _HLIDAC_CACHE.clear()
+    _HLIDAC_CACHE[ico] = (datetime.now(), out)
+    return out
+
+
 def stav(con, demo=False):
     one = lambda q: con.execute(q).fetchone()[0]
-    rng = con.execute("SELECT MIN(datum_zahajeni), MAX(datum_zahajeni) FROM zakazky WHERE datum_zahajeni >= '2000' AND datum_zahajeni <= date('now', '+1 day')").fetchone()
+    rng = rozsah_dat(con)
     last = con.execute("SELECT konec FROM behy WHERE stav='ok' ORDER BY id DESC LIMIT 1").fetchone()
     return {
         "demo": demo,
         "zakazek": one("SELECT COUNT(*) FROM zakazky"),
         "vitezu": one("SELECT COUNT(*) FROM vitezove"),
         "dodavatelu": one("SELECT COUNT(*) FROM dodavatele"),
-        "smluv": one("SELECT COUNT(*) FROM smlouvy"),
+        "smluv": max(one("SELECT COUNT(*) FROM smlouvy"), one("SELECT COALESCE(SUM(pocet), 0) FROM smlouvy_souhrn")),
+        "obdobi": obdobi(con),
         "firem_ares": one("SELECT COUNT(*) FROM firmy"),
         "od": rng[0], "do": rng[1],
         "posledni_aktualizace": last[0] if last else None,
@@ -160,7 +234,7 @@ def hledat(con, q, ares_base=None, limit=12):
         return []
     where = " AND ".join("nazev_norm LIKE ?" for _ in words)
     # bezpecnost: jen zastupne znaky ?, hodnoty jdou jako parametry (vedome potlaceni nalezu banditu, viz SECURITY.md)
-    rows = con.execute(f"SELECT * FROM dodavatele WHERE {where} ORDER BY objem DESC, vyhry DESC LIMIT ?",  # nosec B608
+    rows = con.execute(f"SELECT * FROM dodavatele WHERE {where} ORDER BY objem DESC, smluv_rs DESC, vyhry DESC LIMIT ?",  # nosec B608
                        [f"%{w}%" for w in words] + [limit]).fetchall()
     out = [dict(r) for r in rows]
     if len(out) < 3 and ares_base:
@@ -463,6 +537,7 @@ def profil(con, ico, cfg, today=None, online=True):
     rs = con.execute("""SELECT COUNT(DISTINCT s.id), SUM(s.hodnota_bez_dph) FROM smlouvy s JOIN smlouvy_strany st ON st.smlouva_id=s.id
                         WHERE st.ico=? AND s.zadavatel_ico != ?""", (ico, ico)).fetchone()
     priznaky = [dict(r) for r in con.execute("SELECT typ, popis FROM priznaky WHERE objekt_id=?", (ico,))]
+    rs_souhrn = rs_firmy(con, ico)
 
     return {
         "ico": ico, "nazev": nazev, "ares": firma or None,
@@ -471,11 +546,13 @@ def profil(con, ico, cfg, today=None, online=True):
                 "median_pomer": med_pomer, "trh_median_pomer": trh_med_pomer, "klientu": len(klienti),
                 "prumer_nabidek": statistics.mean(nab) if nab else None, "jedna_nabidka": jedna, "s_poctem_nabidek": len(nab),
                 "smluv_rs": rs[0] or 0, "objem_rs": rs[1] or 0,
+                "smluv_rs_souhrn": (rs_souhrn or {}).get("pocet", 0), "objem_rs_souhrn": (rs_souhrn or {}).get("objem", 0),
                 "overeno_rs": sum(1 for w in wins if w["overeno_rs"])},
         "skore": {"celkem": celk, "hodnoceni": hodnoceni, "slozky": slozky},
         "mesice": mesice, "segmenty": segmenty, "klienti": klienti[:12], "ceny": ceny,
         "souboje": souboje, "rivalove": rivalove, "regiony": [{"kraj": k, "pocet": n} for k, n in regiony],
         "prilezitosti": prilez[:20], "zakazky": zak_list[:200], "priznaky": priznaky,
+        "registr": rs_souhrn, "obdobi": obdobi(con), "hlidac": hlidac_smlouvy(cfg, ico, online),
         "zpravy": _zpravy_firmy(con, cfg["zdroje"]["zpravy_base"], nazev if nazev != ico else None, online, cfg.get("exa_api_key")),
     }
 
@@ -487,7 +564,11 @@ def trh(con, segment=None):
         zak = [z for z in zak if cpv_group(z["cpv_hlavni"]) == segment]
     ids = {z["id"] for z in zak}
     by_m = Counter(_month(z["datum_zahajeni"]) for z in zak if z["datum_zahajeni"])
-    segs = Counter(cpv_group(z["cpv_hlavni"]) for z in con.execute("SELECT cpv_hlavni FROM zakazky"))
+    segs, odhad = Counter(), Counter()
+    for (c,) in con.execute("SELECT cpv_hlavni FROM zakazky"):
+        segs[cpv_group(c)] += 1
+        if c and len(c) == 2:  # segment odhadnuty z nazvu zakazky (ts/segmenty.py), ne uvedene CPV
+            odhad[cpv_group(c)] += 1
     dod = defaultdict(lambda: {"vyhry": 0, "objem": 0.0, "nazev": None})
     for v in con.execute("SELECT zakazka_id, dodavatel_ico, dodavatel_nazev, cena_bez_dph FROM vitezove WHERE dodavatel_ico IS NOT NULL"):
         if v[0] not in ids:
@@ -507,6 +588,54 @@ def trh(con, segment=None):
         "mesice": [{"mesic": m, "pocet": n} for m, n in sorted(by_m.items())
                    if (date.today() - timedelta(days=730)).isoformat()[:7] <= m <= date.today().isoformat()[:7]],
         "kraje": [{"kraj": k, "pocet": n} for k, n in Counter(z["kraj"] or "neuvedeno" for z in zak).most_common(14)],
-        "segmenty": [{"segment": s, "pocet": n} for s, n in segs.most_common(40)],
+        "segmenty": [{"segment": s, "pocet": n, "odhad": odhad[s]} for s, n in segs.most_common(40)],
+        "odhadnuto": sum(odhad.values()) if not segment else sum(1 for z in zak if z["cpv_hlavni"] and len(z["cpv_hlavni"]) == 2),
         "top": top,
     }
+
+
+# ---------------------------------------------------------------- knowledge graph
+def graf(con, ico, cfg):
+    """Knowledge graph firmy pro zobrazeni v aplikaci (obdoba exportu do Obsidianu):
+    firma -> zakaznici (RVZ i Registr smluv), konkurenti, obory (CPV), vyhrane zakazky a zdroje dat.
+    Kazdy uzel nese odkaz: firma/segment uvnitr aplikace, zakazka a zdroj ven."""
+    p = profil(con, ico, cfg, online=False)
+    uzly, hrany, ids = [], [], set()
+
+    def uzel(uid, typ, nazev, odkaz=None, vaha=1.0, info=None):
+        if uid not in ids:
+            ids.add(uid)
+            uzly.append({"id": uid, "typ": typ, "nazev": (nazev or uid)[:90], "odkaz": odkaz, "vaha": vaha, "info": info})
+        return uid
+
+    def hrana(a, b, typ, popis=None):
+        hrany.append({"od": a, "do": b, "typ": typ, "popis": popis})
+
+    f = uzel(f"f:{p['ico']}", "firma", p["nazev"], f"#/firma/{p['ico']}", 3)
+    for s in p["segmenty"][:6]:
+        if s["segment"] == NEUVEDENO:
+            continue
+        hrana(f, uzel(f"s:{s['segment']}", "obor", s["segment"], f"#/trh/{quote(s['segment'])}", 1.6), "pusobi_v",
+              f"{s['vyhry']}× výhra")
+    for k in p["klienti"][:8]:
+        hrana(f, uzel(f"z:{k['ico']}", "zadavatel", k["nazev"], f"https://ares.gov.cz/ekonomicke-subjekty?ico={k['ico']}", 1.3,
+                      f"{k['vyhry']}× výhra v soutěži"), "zakaznik", "RVZ")
+    for o in ((p.get("registr") or {}).get("odberatele") or [])[:8]:
+        hrana(f, uzel(f"z:{o['ico']}", "zadavatel", o["nazev"], f"https://ares.gov.cz/ekonomicke-subjekty?ico={o['ico']}", 1.3,
+                      f"{o['pocet']} smluv"), "zakaznik", "Registr smluv")
+    for r in p["rivalove"][:6]:
+        hrana(f, uzel(f"f:{r['ico']}", "konkurent", r["nazev"], f"#/firma/{r['ico']}", 1.4), "konkurent", "stejné obory")
+    for s in p["souboje"][:4]:
+        hrana(f, uzel(f"f:{s['ico']}", "konkurent", s["nazev"], f"#/firma/{s['ico']}", 1.4), "souboj", f"{s['stretu']}× střet")
+    for z in [z for z in p["zakazky"] if z["vysledek"] != "neúspěch"][:10]:
+        zid = uzel(f"t:{z['id']}", "zakazka", z["nazev"], z["url"], 0.9, z.get("datum"))
+        hrana(f, zid, "vyhral", "výhra")
+        if z["segment"] != NEUVEDENO and f"s:{z['segment']}" in ids:
+            hrana(zid, f"s:{z['segment']}", "obor")
+    zdroje = [("ARES", f"https://ares.gov.cz/ekonomicke-subjekty?ico={p['ico']}"),
+              ("Hlídač státu", (p.get("hlidac") or {}).get("url")),
+              ("Věstník / NEN (RVZ)", "https://isvz.nipez.cz/")]
+    for nazev, url in zdroje:
+        if url:
+            hrana(f, uzel(f"d:{nazev}", "zdroj", nazev, url, 0.8), "zdroj")
+    return {"ico": p["ico"], "nazev": p["nazev"], "uzly": uzly, "hrany": hrany}

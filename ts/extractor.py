@@ -312,6 +312,18 @@ def extract(rec, zdroj="rvz"):
         "kriteria": " | ".join(kriteria[:8]),
         "url": url,
     }
+    # kvalifikace (podminky ucasti), pokud je zdroj uvadi: text a pripadny pozadovany minimalni obrat
+    kval, min_obrat = [], None
+    for _, k, ctx, val in leaves:
+        kc_ = k + "/" + ctx
+        if isinstance(val, str) and ("kvalifik" in kc_ or "podminkyucast" in kc_ or "qualification" in kc_ or "selectioncriteri" in kc_):
+            t = " ".join(val.split())
+            if 3 < len(t) <= 400 and t not in kval and not t.replace(".", "").isdigit():
+                kval.append(t)
+        if ("obrat" in kc_ or "turnover" in kc_) and _num(val) and (to_float(val) or 0) >= 10_000:
+            min_obrat = max(min_obrat or 0, to_float(val))
+    zak["kvalifikace"] = " | ".join(kval[:6])[:1200] or None
+    zak["min_obrat"] = min_obrat
     vit = [{"dodavatel_ico": k[0] or None, "dodavatel_nazev": k[1] or None, "cena_bez_dph": v} for k, v in vitezove.items()]
     uc = [{"dodavatel_ico": k[0] or None, "dodavatel_nazev": k[1] or None, "nabidkova_cena": v} for k, v in ucastnici.items()]
     return zak, vit, uc
