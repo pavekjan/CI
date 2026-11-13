@@ -1,5 +1,5 @@
 # TenderScope - kontejner pro bezplatny hosting (Hugging Face Spaces, Render, ...)
-FROM python:3.12-slim
+FROM python:3.15-slim
 
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
