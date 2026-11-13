@@ -60,23 +60,6 @@ CREATE TABLE IF NOT EXISTS smlouvy_strany (
     nazev TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_strany_ico ON smlouvy_strany(ico);
-CREATE INDEX IF NOT EXISTS ix_vit_ico ON vitezove(dodavatel_ico);
-CREATE INDEX IF NOT EXISTS ix_uc_ico ON ucastnici(dodavatel_ico);
-CREATE INDEX IF NOT EXISTS ix_uc_zak ON ucastnici(zakazka_id);
-CREATE INDEX IF NOT EXISTS ix_vit_zak ON vitezove(zakazka_id);
-CREATE INDEX IF NOT EXISTS ix_zak_zad ON zakazky(zadavatel_ico);
-CREATE INDEX IF NOT EXISTS ix_zak_cpv ON zakazky(cpv_hlavni);
-CREATE TABLE IF NOT EXISTS dodavatele (
-    ico TEXT PRIMARY KEY,
-    nazev TEXT,
-    nazev_norm TEXT,
-    vyhry INTEGER,
-    ucasti INTEGER,
-    objem REAL,
-    smluv_rs INTEGER,
-    ucasti_zname INTEGER,
-    vyhry_zname INTEGER
-);
 CREATE INDEX IF NOT EXISTS ix_smlouvy_zad ON smlouvy(zadavatel_ico);
 CREATE TABLE IF NOT EXISTS firmy (
     ico TEXT PRIMARY KEY,
@@ -102,10 +85,6 @@ CREATE TABLE IF NOT EXISTS priznaky (
     typ TEXT,
     popis TEXT
 );
-CREATE TABLE IF NOT EXISTS soubory (
-    klic TEXT PRIMARY KEY,
-    podpis TEXT
-);
 CREATE TABLE IF NOT EXISTS behy (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     zacatek TEXT,
@@ -119,8 +98,7 @@ CREATE TABLE IF NOT EXISTS behy (
 
 def connect(path=None):
     path = path or os.path.join(DATA_DIR, "tenderscope.db")
-    con = sqlite3.connect(path, timeout=30, check_same_thread=False)
+    con = sqlite3.connect(path)
     con.row_factory = sqlite3.Row
-    con.execute("PRAGMA journal_mode=WAL")  # aplikace muze cist, zatimco agenti zapisuji
     con.executescript(SCHEMA)
     return con

@@ -115,14 +115,20 @@ export interface Beh {
 }
 
 export interface Nastaveni {
+  verejne?: boolean;
+  admin?: boolean;
   obsidian_vault: string;
   exa_api_key_nastaven: boolean;
   exa_api_key_nahled: string;
-  anthropic_api_key_nastaven: boolean;
-  anthropic_api_key_nahled: string;
-  anthropic_model: string;
-  anthropic_sdk: boolean;
+  ai: { poskytovatel: string; pripraveno: boolean; model: string | null; anthropic_sdk: boolean; poskytovatele: AiPoskytovatel[] };
+  limity?: { ai_dnes: number; ai_max: number; exa_dnes: number; exa_max: number };
 }
+export interface AiPoskytovatel {
+  id: string; nazev: string; web: string; potrebuje_klic: boolean; ma_klic_pole: boolean; vlastni_url: boolean; env: string | null;
+  klic_nastaven: boolean; klic_nahled: string; model: string; model_vychozi: string; url: string;
+  zdarma: boolean; limit: string; pozn: string; soukromi_ok: boolean; potrebuje_ucet: boolean; ucet: string;
+}
+export interface AiForm { llm_poskytovatel?: string; llm_klic?: string; llm_model?: string; llm_url?: string; llm_ucet?: string }
 
 // ---------------- onboarding
 export interface Otazka { id: string; category: string; question_text: string; quick_replies: string[]; allow_multiple: boolean }
@@ -144,7 +150,7 @@ export interface Recon {
   web: { url: string; titulek?: string | null; popis?: string | null; chyba?: string } | null;
   zdroje: Zdroj[];
 }
-export interface AgentInfo { rezim: "claude" | "pravidla"; duvod?: string; model?: string; vstup_tokenu?: number; vystup_tokenu?: number }
+export interface AgentInfo { rezim: "llm" | "claude" | "pravidla"; duvod?: string; poskytovatel?: string; model?: string; vstup_tokenu?: number; vystup_tokenu?: number }
 export interface Profil2 {
   ico: string; nazev: string; vertical: string; core_capabilities_description: string;
   cpv_codes: { main: string[]; secondary: string[] };
@@ -176,15 +182,46 @@ export interface ExportVysledek {
   chyba_zapisu?: string;
 }
 
+export const ADMIN_KEY = "ts_admin_heslo";
+export function adminHeslo(): string {
+  try { return localStorage.getItem(ADMIN_KEY) || ""; } catch { return ""; }
+}
+export function nastavAdminHeslo(h: string) {
+  try { if (h) localStorage.setItem(ADMIN_KEY, h); else localStorage.removeItem(ADMIN_KEY); } catch { /* bez uloziste */ }
+}
+/** Nahodne ID tohoto prohlizece. Na online verzi podle nej server oddeluje onboardingy
+ *  jednotlivych navstevniku (kdo ID nezna, cizi profil neuvidi). Neni to heslo ani osobni udaj. */
+let _uid = "";
+function uzivatelId(): string {
+  if (_uid) return _uid;
+  try { _uid = localStorage.getItem("ts_uzivatel") || ""; } catch { /* bez uloziste */ }
+  if (!/^[A-Za-z0-9-]{16,64}$/.test(_uid)) {
+    const b = new Uint8Array(16);
+    crypto.getRandomValues(b);
+    _uid = Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+    try { localStorage.setItem("ts_uzivatel", _uid); } catch { /* bez uloziste: ID plati do zavreni stranky */ }
+  }
+  return _uid;
+}
+
+/** Hlavicky pro server; na verejne (online) verzi nese admin heslo a ID prohlizece. */
+function hdr(json = true): Record<string, string> {
+  const h: Record<string, string> = json ? { "Content-Type": "application/json" } : {};
+  h["X-Uzivatel"] = uzivatelId();
+  const a = adminHeslo();
+  if (a) h["X-Admin-Heslo"] = encodeURIComponent(a);
+  return h;
+}
+
 async function post<T>(url: string, body: unknown): Promise<T> {
-  const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const r = await fetch(url, { method: "POST", headers: hdr(), body: JSON.stringify(body) });
   const data = await r.json();
   if (!r.ok) throw new Error(data?.chyba || `HTTP ${r.status}`);
   return data as T;
 }
 
 async function get<T>(url: string): Promise<T> {
-  const r = await fetch(url);
+  const r = await fetch(url, { headers: hdr(false) });
   const data = await r.json();
   if (!r.ok) throw new Error(data?.chyba || `HTTP ${r.status}`);
   return data as T;
@@ -204,12 +241,16 @@ export const api = {
     post<{ company_profile: Profil2; agent: AgentInfo; zpravodaj: Zpravodaj }>("/api/onboarding/dokoncit", { ico, odpovedi }),
   onbUlozProfil: (ico: string, profil: Profil2) =>
     post<{ company_profile: Profil2; zpravodaj: Zpravodaj }>(`/api/onboarding/${encodeURIComponent(ico)}/profil`, { profil }),
-  ulozNastaveni: async (body: { obsidian_vault?: string; exa_api_key?: string; anthropic_api_key?: string; anthropic_model?: string }) => {
-    const r = await fetch("/api/nastaveni", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-    return (await r.json()) as Nastaveni;
+  aiModely: (body: AiForm) => post<{ ok: boolean; modely?: string[]; chyba?: string }>("/api/ai/modely", body),
+  aiTest: (body: AiForm) => post<{ ok: boolean; odpoved?: string; chyba?: string; poskytovatel?: string; model?: string }>("/api/ai/test", body),
+  ulozNastaveni: async (body: AiForm & { obsidian_vault?: string; exa_api_key?: string }) => {
+    const r = await fetch("/api/nastaveni", { method: "POST", headers: hdr(), body: JSON.stringify(body) });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d?.chyba || `HTTP ${r.status}`);
+    return d as Nastaveni;
   },
   export: async (ico: string) => {
-    const r = await fetch(`/api/export/${encodeURIComponent(ico)}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ zapsat: true }) });
+    const r = await fetch(`/api/export/${encodeURIComponent(ico)}`, { method: "POST", headers: hdr(), body: JSON.stringify({ zapsat: true }) });
     const d = await r.json();
     if (!r.ok) throw new Error(d?.chyba || `HTTP ${r.status}`);
     return d as ExportVysledek;
@@ -218,9 +259,11 @@ export const api = {
   aktualizovat: async (rezim: "rychle" | "plny") => {
     const r = await fetch("/api/aktualizovat", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: hdr(),
       body: JSON.stringify({ rezim }),
     });
-    return r.json();
+    const d = await r.json();
+    if (!r.ok) throw new Error(d?.chyba || d?.zprava || `HTTP ${r.status}`);
+    return d;
   },
 };

@@ -35,18 +35,9 @@ def load_config(path=None):
     return cfg
 
 
-LOG_SINKS = []  # server si sem prida funkci a posila log do webove aplikace
-
-
 def log(agent, msg):
     ts = datetime.now().strftime("%H:%M:%S")
-    line = f"[{ts}] {agent:<12} {msg}"
-    print(line, flush=True)
-    for sink in LOG_SINKS:
-        try:
-            sink(line)
-        except Exception:
-            pass
+    print(f"[{ts}] {agent:<12} {msg}", flush=True)
 
 
 def norm(s):
@@ -88,23 +79,19 @@ def parse_date(v):
     if isinstance(v, (date, datetime)):
         return v if isinstance(v, date) and not isinstance(v, datetime) else v.date()
     s = str(v).strip()
-    d = None
     m = re.match(r"(\d{4})-(\d{2})-(\d{2})", s)
     if m:
         try:
-            d = date(int(m[1]), int(m[2]), int(m[3]))
+            return date(int(m[1]), int(m[2]), int(m[3]))
         except ValueError:
             return None
-    else:
-        m = re.match(r"(\d{1,2})\.\s*(\d{1,2})\.\s*(\d{4})", s)
-        if m:
-            try:
-                d = date(int(m[3]), int(m[2]), int(m[1]))
-            except ValueError:
-                return None
-    if d and not (2000 <= d.year <= 2045):  # preklepy v datech (napr. rok 0217)
-        return None
-    return d
+    m = re.match(r"(\d{1,2})\.\s*(\d{1,2})\.\s*(\d{4})", s)
+    if m:
+        try:
+            return date(int(m[3]), int(m[2]), int(m[1]))
+        except ValueError:
+            return None
+    return None
 
 
 def ico_valid(ico):

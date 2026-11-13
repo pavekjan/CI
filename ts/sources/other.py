@@ -7,9 +7,9 @@ from ..util import http_get, log, nuts_to_kraj
 
 
 # ---------------- ARES ----------------
-def ares_firma(base, ico, retries=3):
+def ares_firma(base, ico):
     """GET https://ares.gov.cz/ekonomicke-subjekty-v-be/rest/ekonomicke-subjekty/{ico}"""
-    r = http_get(f"{base}{ico}", headers={"Accept": "application/json"}, timeout=30 if retries > 1 else 10, retries=retries)
+    r = http_get(f"{base}{ico}", headers={"Accept": "application/json"}, timeout=30)
     if r.status_code == 404:
         return None
     if r.status_code != 200:
@@ -52,8 +52,8 @@ def hlidac_zakazky(base, token, dotaz, max_stran=5):
 
 
 # ---------------- Google News RSS ----------------
-def google_news(base, dotaz, limit=10, retries=3):
-    r = http_get(base, params={"q": dotaz, "hl": "cs", "gl": "CZ", "ceid": "CZ:cs"}, timeout=30 if retries > 1 else 8, retries=retries)
+def google_news(base, dotaz, limit=10):
+    r = http_get(base, params={"q": dotaz, "hl": "cs", "gl": "CZ", "ceid": "CZ:cs"}, timeout=30)
     if r.status_code != 200:
         return []
     root = ET.fromstring(r.content)

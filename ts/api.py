@@ -159,7 +159,8 @@ def hledat(con, q, ares_base=None, limit=12):
     if not words:
         return []
     where = " AND ".join("nazev_norm LIKE ?" for _ in words)
-    rows = con.execute(f"SELECT * FROM dodavatele WHERE {where} ORDER BY objem DESC, vyhry DESC LIMIT ?",
+    # bezpecnost: jen zastupne znaky ?, hodnoty jdou jako parametry (vedome potlaceni nalezu banditu, viz SECURITY.md)
+    rows = con.execute(f"SELECT * FROM dodavatele WHERE {where} ORDER BY objem DESC, vyhry DESC LIMIT ?",  # nosec B608
                        [f"%{w}%" for w in words] + [limit]).fetchall()
     out = [dict(r) for r in rows]
     if len(out) < 3 and ares_base:

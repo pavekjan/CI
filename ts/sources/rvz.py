@@ -29,10 +29,6 @@ def fetch_month(base, year, month, kategorie="VZ", current=False):
     return download(url, dest, max_age_hours=24 * 7 if current else None)
 
 
-def _backend():
-    return f"ijson/{getattr(ijson, 'backend', '?')}" if ijson is not None else "json"
-
-
 def _iter_json_stream(fobj):
     """Projde JSON soubor a vrati jednotlive zaznamy (dict) - zvladne pole, objekt s polem i JSONL."""
     head = fobj.read(4096)
@@ -96,8 +92,6 @@ def iter_records(zip_path):
         for name in z.namelist():
             if not name.lower().endswith((".json", ".jsonl")):
                 continue
-            size = z.getinfo(name).file_size
-            log("Scout", f"  cteni {name} ({size / 1e6:.0f} MB rozbaleno, parser: {_backend()})")
             with z.open(name) as raw:
                 # ijson potrebuje seek -> nacteme do docasneho souboru jen kdyz je to nutne
                 buf = _seekable(raw)

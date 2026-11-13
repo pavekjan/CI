@@ -1,0 +1,29 @@
+# Render Blueprint: Render podle tohoto souboru sam vytvori bezplatnou webovou sluzbu z Dockerfile.
+services:
+  - type: web
+    name: tenderscope
+    runtime: docker
+    plan: free
+    region: frankfurt
+    healthCheckPath: /api/stav
+    envVars:
+      - key: TS_ADMIN_HESLO      # heslo spravce (aktualizace dat, klice, diagnostika)
+        sync: false
+      - key: LLM_POSKYTOVATEL    # nepovinne, napr. anthropic | openai | gemini | groq | openrouter_free | ovh (viz README, kap. 7)
+        sync: false
+      - key: ANTHROPIC_API_KEY   # vyplnte jen klic k vybrane AI (pouziva ji jen spravce)
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: MISTRAL_API_KEY
+        sync: false
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: GROQ_API_KEY        # zdarma (dalsi klice viz .env.example)
+        sync: false
+      - key: LLM_MODEL           # nepovinne: nazev modelu
+        sync: false
+      - key: HLIDAC_TOKEN        # nepovinne: Hlidac statu
+        sync: false

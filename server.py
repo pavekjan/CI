@@ -18,7 +18,10 @@ Frontend (TypeScript/React) je predkompilovany ve web/dist. API:
     GET  /api/vhodnost/<ico>?zakazka=<id>  dotaznik vhodnosti jedne zakazky
 """
 import argparse
+import hmac
 import json
+import re
+import secrets
 import mimetypes
 import os
 import sys
@@ -32,59 +35,195 @@ from urllib.parse import parse_qs, unquote, urlparse
 ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ROOT)
 
-from ts import api, onboarding, scout, verifier  # noqa: E402
+from ts import api, bezpecnost, onboarding, scout, verifier  # noqa: E402
 from ts.db import connect  # noqa: E402
-from ts.util import DATA_DIR, LOG_SINKS, load_config, log  # noqa: E402
+from ts.util import DATA_DIR, LOCAL_CONFIG, LOG_SINKS, load_config, log, nacti_env_soubor  # noqa: E402
 
 DIST = os.path.join(ROOT, "web", "dist")
 STATE = {"demo": False, "db": os.path.join(DATA_DIR, "tenderscope.db"), "cfg": None}
 JOB = {"bezi": False, "rezim": None, "log": [], "chyba": None, "zacatek": None, "konec": None}
 JOB_LOCK = threading.Lock()
 EXPORTS = {}  # ico -> (nazev souboru, bytes zipu)
-CONFIG_PATH = os.path.join(ROOT, "config.json")
+
+nacti_env_soubor()  # .env (mimo git) -> promenne prostredi, jeste pred ctenim TS_ADMIN_HESLO
+
+# ---------------------------------------------------------------------------------------------
+# BEZPECNOST (viz SECURITY.md)
+# Online (verejna) verze: zapne se TS_VEREJNE=1, nastavenim TS_ADMIN_HESLO, nebo samo, kdyz server
+# posloucha na jine nez lokalni adrese. Pak smi kdokoli prohlizet, ale aktualizaci dat, klice,
+# diagnostiku a placena API (Claude, Exa) pouzije jen spravce s heslem (hlavicka X-Admin-Heslo).
+# Pri jakekoli chybe kontroly se pristup ZAMITNE (fail closed).
+# ---------------------------------------------------------------------------------------------
+SEC = {
+    "verejne": (os.environ.get("TS_VEREJNE", "").lower() in ("1", "true", "ano")) or bool(os.environ.get("TS_ADMIN_HESLO")),
+    "heslo": os.environ.get("TS_ADMIN_HESLO", ""),
+    "proxy_hops": int(os.environ.get("TS_PROXY_HOPS") or 1),  # Render = 1 proxy pred aplikaci
+    "hosty": {h.strip().lower() for h in (os.environ.get("TS_POVOLENE_HOSTY") or "").split(",") if h.strip()},
+}
+NEPOVOLENO = "Na online verzi to může jen správce. Zadejte admin heslo v záložce Data."
+MAX_TELO = 512 * 1024          # max. velikost JSON tela pozadavku
+LIMIT_API = bezpecnost.RateLimiter(int(os.environ.get("TS_LIMIT_ZA_MINUTU") or 120), 60)
+LIMIT_DRAHE = bezpecnost.RateLimiter(int(os.environ.get("TS_LIMIT_DRAHE_ZA_MINUTU") or 10), 60)
+LIMIT_HESLO = bezpecnost.RateLimiter(5, 15 * 60)   # 5 chybnych hesel za 15 minut na IP
+# denni strop volani AI (Claude, OpenAI, Gemini...) pro celou aplikaci - ochrana penezenky
+LLM_DEN = bezpecnost.DenniLimit(int(os.environ.get("TS_LIMIT_LLM_DEN") or os.environ.get("TS_LIMIT_CLAUDE_DEN") or 30))
+EXA_DEN = bezpecnost.DenniLimit(int(os.environ.get("TS_LIMIT_EXA_DEN") or 40))
+MAX_EXPORTU = 20
 
 
-def nastaveni_get():
+def je_admin(headers, ip="?"):
+    """Fail closed: kdyz cokoli selze, vraci False."""
+    try:
+        if not SEC["verejne"]:
+            return True
+        if not SEC["heslo"]:
+            return False
+        h = headers.get("X-Admin-Heslo")
+        if not h:
+            return False
+        ok = hmac.compare_digest(unquote(h).encode("utf-8"), SEC["heslo"].encode("utf-8"))
+        if not ok:
+            log("Bezpecnost", f"chybne admin heslo z {ip}")
+        return ok
+    except Exception:
+        log("Bezpecnost", "chyba pri kontrole opravneni -> zamitnuto")
+        return False
+
+
+def cfg_pro(admin):
+    """Na verejne verzi bez hesla se nepouzivaji placena API (AI, Exa) - onboarding jede na pravidla."""
+    if admin:
+        return STATE["cfg"]
+    return dict(STATE["cfg"], llm_vypnuto=True, exa_api_key="")
+
+
+def _nahled(k):
+    return (k[:5] + "…") if k and len(k) > 12 else ("✓" if k else "")
+
+
+def nastaveni_get(admin=True):
+    from ts import llm
     c = STATE["cfg"]
     key = c.get("exa_api_key") or ""
-    ak = c.get("anthropic_api_key") or ""
+    skryt = SEC["verejne"] and not admin  # navstevnik nepotrebuje vedet nic o klicich, adresach ani cestach
+    prov = llm.poskytovatel(c)
+    poskytovatele = []
+    for pid, p in llm.POSKYTOVATELE.items():
+        k = (c.get(p["klic"]) or "") if p["klic"] else ""
+        poskytovatele.append({
+            "id": pid, "nazev": p["nazev"], "web": p["web"], "potrebuje_klic": bool(p["klic"]) and not p.get("klic_volitelny"),
+            "ma_klic_pole": bool(p["klic"]), "vlastni_url": bool(p.get("vlastni_url")), "env": p["env"],
+            "klic_nastaven": bool(k), "klic_nahled": "" if skryt else _nahled(k),
+            "model": c.get(f"{pid}_model") or p["model"], "model_vychozi": p["model"],
+            "url": "" if skryt else ((c.get(f"{pid}_url") if p.get("vlastni_url") else None) or p["url"]),
+            "zdarma": bool(p.get("zdarma")), "limit": p.get("limit", ""), "pozn": p.get("pozn", ""),
+            "soukromi_ok": bool(p.get("soukromi_ok")), "potrebuje_ucet": bool(p.get("ucet")),
+            "ucet": "" if skryt else (c.get(f"{pid}_ucet") or ""),
+        })
+    aktivni = llm.nastaveni(c)
+    return {"obsidian_vault": "" if skryt else (c.get("obsidian_vault") or ""), "exa_api_key_nastaven": bool(key),
+            "exa_api_key_nahled": "" if skryt else _nahled(key),
+            "ai": {"poskytovatel": prov, "pripraveno": bool(aktivni), "model": aktivni["model"] if aktivni else None,
+                   "poskytovatele": poskytovatele, "anthropic_sdk": llm.dostupne()},
+            "verejne": SEC["verejne"], "admin": admin,
+            "limity": {"ai_dnes": LLM_DEN.pouzito, "ai_max": LLM_DEN.limit,
+                       "exa_dnes": EXA_DEN.pouzito, "exa_max": EXA_DEN.limit}}
+
+
+def _ai_hodnoty(body):
+    """Validace nastaveni AI z formulare. Vraci {klic_v_configu: hodnota}."""
     from ts import llm
-    return {"obsidian_vault": c.get("obsidian_vault") or "", "exa_api_key_nastaven": bool(key),
-            "exa_api_key_nahled": (key[:4] + "…" + key[-3:]) if len(key) > 8 else "",
-            "anthropic_api_key_nastaven": bool(ak), "anthropic_api_key_nahled": (ak[:7] + "…" + ak[-4:]) if len(ak) > 12 else "",
-            "anthropic_model": c.get("anthropic_model") or llm.DEFAULT_MODEL, "anthropic_sdk": llm.dostupne()}
+    out = {}
+    prov = body.get("llm_poskytovatel")
+    if prov is not None:
+        if prov not in llm.POSKYTOVATELE:
+            raise bezpecnost.ChybaVstupu("Neznámý poskytovatel AI.")
+        out["llm_poskytovatel"] = prov
+    prov = prov or llm.poskytovatel(STATE["cfg"])
+    p = llm.POSKYTOVATELE[prov]
+    if body.get("llm_klic"):
+        if not p["klic"]:
+            raise bezpecnost.ChybaVstupu(f"{p['nazev']} klíč nepotřebuje.")
+        out[p["klic"]] = bezpecnost.klic_api(body["llm_klic"], "API klíč")
+    if body.get("llm_model"):
+        out[f"{prov}_model"] = bezpecnost.model(body["llm_model"])
+    if body.get("llm_url") is not None and p.get("vlastni_url"):
+        out[f"{prov}_url"] = bezpecnost.over_api_url(body["llm_url"], SEC["verejne"])
+    if body.get("llm_ucet") and p.get("ucet"):
+        ucet = bezpecnost.text(body["llm_ucet"], 40, "Account ID").lower()
+        if not re.fullmatch(llm.UCET_RE, ucet):
+            raise bezpecnost.ChybaVstupu("Account ID má 32 znaků (0-9, a-f), najdete ho v přehledu účtu Cloudflare.")
+        out[f"{prov}_ucet"] = ucet
+    return out
 
 
 def nastaveni_set(body):
-    with open(CONFIG_PATH, encoding="utf-8") as f:
-        raw = json.load(f)
-    for k in ("obsidian_vault", "exa_api_key", "anthropic_api_key", "anthropic_model"):
-        if k in body and body[k] is not None:
-            raw[k] = str(body[k]).strip()
-            STATE["cfg"][k] = raw[k]
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        json.dump(raw, f, ensure_ascii=False, indent=2)
+    """Klice se ukladaji do config.local.json (je v .gitignore), nikdy do config.json v gitu."""
+    hodnoty = _ai_hodnoty(body)
+    if "obsidian_vault" in body and not SEC["verejne"]:  # server nezapisuje do libovolnych slozek
+        hodnoty["obsidian_vault"] = bezpecnost.text(body.get("obsidian_vault"), 500, "cesta k Obsidianu")
+    if body.get("exa_api_key"):
+        hodnoty["exa_api_key"] = bezpecnost.klic_api(body.get("exa_api_key"), "Exa klíč")
+    lokal = {}
+    if os.path.exists(LOCAL_CONFIG):
+        with open(LOCAL_CONFIG, encoding="utf-8") as f:
+            lokal = json.load(f)
+    lokal.update(hodnoty)
+    STATE["cfg"].update(hodnoty)
+    with open(LOCAL_CONFIG, "w", encoding="utf-8") as f:
+        json.dump(lokal, f, ensure_ascii=False, indent=2)
+    log("Bezpecnost", "nastaveni zmeneno: " + (", ".join(hodnoty) or "nic"))  # jen nazvy poli, nikdy hodnoty
     return nastaveni_get()
 
 
-def export_obsidian(ico, zapsat):
+def ai_akce(body, akce):
+    """Nacist modely / vyzkouset AI s hodnotami z formulare (bez ulozeni)."""
+    from ts import llm
+    cfg = dict(STATE["cfg"], **_ai_hodnoty(body))
+    prov = llm.poskytovatel(cfg)
+    n = llm.nastaveni(cfg, prov)
+    if not n:
+        p = llm.POSKYTOVATELE[prov]
+        if p.get("vlastni_url") and not (cfg.get(f"{prov}_url") or p["url"]):
+            chybi = "adresu API"
+        elif p.get("ucet") and not cfg.get(f"{prov}_ucet"):
+            chybi = "Account ID" + ("" if cfg.get(p["klic"]) else " a API token")
+        else:
+            chybi = "API klíč"
+        raise bezpecnost.ChybaVstupu(f"Nejdřív vyplňte {chybi} pro {p['nazev']}.")
+    try:
+        if akce == "modely":
+            return {"ok": True, "modely": llm.modely(n)}
+        if not LLM_DEN.vezmi():
+            raise bezpecnost.ChybaVstupu("Denní limit volání AI je vyčerpán.")
+        return llm.vyzkousej(n)
+    except bezpecnost.ChybaVstupu:
+        raise
+    except Exception as e:
+        return {"ok": False, "chyba": llm.chyba_text(e)}
+
+
+def export_obsidian(ico, zapsat, cfg):
     from ts import obsidian
     con = connect(STATE["db"])
     try:
         online = not STATE["demo"]
-        p = api.profil(con, ico, STATE["cfg"], online=online)
+        p = api.profil(con, ico, cfg, online=online)
         exa = []
-        key = STATE["cfg"].get("exa_api_key")
-        if key and online and p["nazev"] != p["ico"]:
+        key = cfg.get("exa_api_key")
+        if key and online and p["nazev"] != p["ico"] and EXA_DEN.vezmi() and EXA_DEN.vezmi():
             exa = obsidian.exa_search(key, f'"{p["nazev"]}" veřejné zakázky', 6) + obsidian.exa_search(key, f'{p["nazev"]} firma novinky', 4)
-        v = obsidian.export_firma(con, p, STATE["cfg"], exa)
+        v = obsidian.export_firma(con, p, cfg, exa)
     finally:
         con.close()
     name = f"TenderScope_{obsidian.safe(p['nazev'], 40).replace(' ', '_')}.zip"
+    EXPORTS.pop(ico, None)
     EXPORTS[ico] = (name, v.zip_bytes())
+    while len(EXPORTS) > MAX_EXPORTU:  # ochrana pameti serveru
+        EXPORTS.pop(next(iter(EXPORTS)))
     out = {"ok": True, "nazev": p["nazev"], "poznamek": len(v.files), "zdroju": v.n_src, "exa": len(exa),
            "zip": f"/api/export-zip/{ico}", "zapsano": None}
-    vault = STATE["cfg"].get("obsidian_vault")
+    vault = cfg.get("obsidian_vault")
     if zapsat and vault:
         if not os.path.isdir(vault):
             out["chyba_zapisu"] = f"Složka trezoru neexistuje: {vault}"
@@ -95,6 +234,10 @@ def export_obsidian(ico, zapsat):
 
 
 def _sink(line):
+    # log aktualizace je videt v aplikaci: bezpecnostni zaznamy (IP adresy) do nej nepatri, jen do konzole
+    # ani co si kdo zadal v onboardingu (IČO firmy) - log vidi vsichni navstevnici online verze
+    if any(f"] {a:<12} " in line for a in ("Bezpecnost", "Server", "Onboarding", "LLM")):
+        return
     JOB["log"].append(line)
     if len(JOB["log"]) > 400:
         del JOB["log"][:100]
@@ -231,11 +374,44 @@ def diagnostika(con, ico=None):
     return out
 
 
+BEZP_HLAVICKY = {
+    # OWASP HTTP Headers Cheat Sheet (prednaska, slajd 50)
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+    "Permissions-Policy": "geolocation=(), camera=(), microphone=(), payment=()",
+    "X-Frame-Options": "DENY",
+    "Cross-Origin-Opener-Policy": "same-origin",
+    "Cross-Origin-Resource-Policy": "same-origin",
+    "Content-Security-Policy": ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+                                "img-src 'self' data:; connect-src 'self'; font-src 'self' data:; object-src 'none'; "
+                                "base-uri 'self'; form-action 'self'; frame-ancestors 'none'"),
+}
+
+
+class Odmitnuto(Exception):
+    def __init__(self, kod, zprava):
+        super().__init__(zprava)
+        self.kod, self.zprava = kod, zprava
+
+
+def _ico_z_cesty(path):
+    return bezpecnost.ico(unquote(path.rsplit("/", 1)[-1]))
+
+
 class Handler(BaseHTTPRequestHandler):
-    server_version = "TenderScope/1.0"
+    server_version = "TenderScope"
+    sys_version = ""      # neprozrazovat verzi Pythonu
+    timeout = 30          # pomale klienty (slowloris) odpojit
 
     def log_message(self, fmt, *args):
         pass
+
+    # -------------------------------------------------------------- odpovedi
+    def _hlavicky(self):
+        for k, v in BEZP_HLAVICKY.items():
+            self.send_header(k, v)
+        if SEC["verejne"] and self.headers.get("X-Forwarded-Proto", "").lower() == "https":
+            self.send_header("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
 
     def _json(self, obj, code=200):
         body = json.dumps(obj, ensure_ascii=False, default=str).encode("utf-8")
@@ -243,15 +419,17 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self._hlavicky()
         self.end_headers()
         self.wfile.write(body)
 
     def _static(self, path):
         if not os.path.isdir(DIST):
             return self._json({"chyba": "Chybi web/dist - frontend neni sestaven."}, 500)
-        rel = path.lstrip("/") or "index.html"
-        full = os.path.normpath(os.path.join(DIST, rel))
-        if not full.startswith(DIST) or not os.path.isfile(full):
+        rel = unquote(path).lstrip("/") or "index.html"
+        full = os.path.realpath(os.path.join(DIST, rel))
+        # path traversal: jen soubory uvnitr web/dist
+        if os.path.commonpath([full, os.path.realpath(DIST)]) != os.path.realpath(DIST) or not os.path.isfile(full):
             full = os.path.join(DIST, "index.html")  # SPA
         ctype = mimetypes.guess_type(full)[0] or "application/octet-stream"
         if full.endswith(".js"):
@@ -261,109 +439,251 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", ctype + ("; charset=utf-8" if ctype.startswith("text") else ""))
         self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "public, max-age=31536000, immutable" if "/assets/" in full else "no-cache")
+        self._hlavicky()
         self.end_headers()
         self.wfile.write(data)
 
+    def _chyba_serveru(self, e):
+        """Uzivatel dostane obecnou hlasku s kodem, detail jde jen do logu (pravidlo 7)."""
+        kod = secrets.token_hex(4)
+        log("Server", f"chyba {kod}: {type(e).__name__}")
+        traceback.print_exc()
+        self._json({"chyba": f"Interní chyba serveru (kód {kod}). Podrobnosti jsou v logu."}, 500)
+
+    # -------------------------------------------------------------- kontroly pred kazdym pozadavkem
+    def _ip(self):
+        xff = self.headers.get("X-Forwarded-For")
+        if SEC["verejne"] and xff:
+            casti = [c.strip() for c in xff.split(",") if c.strip()]
+            if casti:  # posledni zaznam pridala nase proxy (Render), predchozi si klient muze vymyslet
+                return casti[-min(SEC["proxy_hops"], len(casti))]
+        return self.client_address[0]
+
+    def _kontrola(self, metoda):
+        host = (self.headers.get("Host") or "").lower()
+        jmeno = host.rsplit(":", 1)[0].strip("[]") if host else ""
+        if not SEC["verejne"]:
+            # lokalni aplikace: jen localhost (ochrana proti DNS rebinding)
+            if jmeno not in ("127.0.0.1", "localhost", "::1"):
+                raise Odmitnuto(403, "Nepovolený Host.")
+        elif SEC["hosty"] and jmeno not in SEC["hosty"]:
+            raise Odmitnuto(403, "Nepovolený Host.")
+        origin = self.headers.get("Origin")
+        if origin and origin != "null":
+            o = urlparse(origin)
+            if (o.netloc or "").lower() != host:
+                # cizi web nesmi volat nase API z prohlizece navstevnika (CORS/CSRF)
+                raise Odmitnuto(403, "Požadavek z cizí stránky byl odmítnut.")
+        elif origin == "null" and metoda == "POST":
+            raise Odmitnuto(403, "Požadavek z cizí stránky byl odmítnut.")
+        if not LIMIT_API.povol(self._ip()):
+            raise Odmitnuto(429, "Příliš mnoho požadavků. Zkuste to za minutu.")
+
+    def _telo(self):
+        ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        if ctype != "application/json":
+            # jednoduchy formular z cizi stranky nemuze poslat application/json bez CORS povoleni
+            raise Odmitnuto(415, "Očekávám JSON.")
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            raise Odmitnuto(400, "Neplatná délka.")
+        if n < 0 or n > MAX_TELO:
+            raise Odmitnuto(413, "Požadavek je příliš velký.")
+        try:
+            body = json.loads(self.rfile.read(n) or b"{}")
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            raise Odmitnuto(400, "Neplatný JSON.")
+        if not isinstance(body, dict):
+            raise Odmitnuto(400, "Neplatný JSON.")
+        return body
+
+    def _admin(self):
+        """Pocitaji se jen CHYBNA hesla: po 5 chybach za 15 minut se z dane IP heslo vubec nezkousi."""
+        ip = self._ip()
+        zadal = SEC["verejne"] and bool(self.headers.get("X-Admin-Heslo"))
+        if zadal and LIMIT_HESLO.vycerpano(ip):
+            raise Odmitnuto(429, "Příliš mnoho pokusů o přihlášení. Zkuste to za 15 minut.")
+        ok = je_admin(self.headers, ip)
+        if zadal and not ok:
+            LIMIT_HESLO.zapocitej(ip)
+        return ok
+
+    def _vyzaduj_admin(self):
+        if not self._admin():
+            log("Bezpecnost", f"odepren pristup k {urlparse(self.path).path} z {self._ip()}")
+            raise Odmitnuto(403, NEPOVOLENO)
+
+    def _vlastnik(self, admin):
+        """Lokalne a pro spravce "" (spolecny prostor). Anonymni navstevnik online verze ma vlastni prostor."""
+        if not SEC["verejne"] or admin:
+            return ""
+        return bezpecnost.vlastnik_z_hlavicky(self.headers.get("X-Uzivatel"))
+
+    def _drahe(self):
+        if not LIMIT_DRAHE.povol(self._ip()):
+            raise Odmitnuto(429, "Příliš mnoho náročných požadavků. Zkuste to za minutu.")
+
+    def _obsluz(self, metoda, fn):
+        try:
+            self._kontrola(metoda)
+            fn()
+        except Odmitnuto as e:
+            self._json({"chyba": e.zprava}, e.kod)
+        except bezpecnost.ChybaVstupu as e:
+            self._json({"chyba": str(e)}, 400)
+        except ValueError as e:  # nase hlasky z aplikacni logiky (napr. "Profil nenalezen")
+            self._json({"chyba": str(e)[:200]}, 400)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        except Exception as e:
+            self._chyba_serveru(e)
+
+    # -------------------------------------------------------------- GET
     def do_GET(self):
+        self._obsluz("GET", self._get)
+
+    def _get(self):
         u = urlparse(self.path)
         q = parse_qs(u.query)
+        arg = lambda k, n: bezpecnost.text((q.get(k) or [""])[0], n, k)
+        if not u.path.startswith("/api/"):
+            return self._static(u.path)
+        con = connect(STATE["db"])
         try:
-            if not u.path.startswith("/api/"):
-                return self._static(u.path)
+            if u.path == "/api/stav":
+                return self._json({**api.stav(con, STATE["demo"]), "aktualizace_bezi": JOB["bezi"]})
+            if u.path == "/api/hledat":
+                return self._json(api.hledat(con, arg("q", 100), None if STATE["demo"] else STATE["cfg"]["zdroje"]["ares_base"]))
+            if u.path.startswith("/api/firma/"):
+                return self._json(api.profil(con, _ico_z_cesty(u.path), STATE["cfg"], online=not STATE["demo"]))
+            if u.path == "/api/trh":
+                return self._json(api.trh(con, arg("segment", 40) or None))
+            if u.path == "/api/nastaveni":
+                return self._json(nastaveni_get(self._admin()))
+            if u.path.startswith("/api/export-zip/"):
+                ico = _ico_z_cesty(u.path)
+                if ico not in EXPORTS:
+                    return self._json({"chyba": "Export nejdřív vytvořte."}, 404)
+                name, data = EXPORTS[ico]
+                self.send_response(200)
+                self.send_header("Content-Type", "application/zip")
+                self.send_header("Content-Disposition", f'attachment; filename="{name}"')
+                self.send_header("Content-Length", str(len(data)))
+                self._hlavicky()
+                self.end_headers()
+                self.wfile.write(data)
+                return
+            if u.path == "/api/onboarding":
+                return self._json(onboarding.seznam(con, self._vlastnik(self._admin())))
+            if u.path.startswith("/api/onboarding/"):
+                st = onboarding.nacti(con, _ico_z_cesty(u.path), self._vlastnik(self._admin()))
+                if not st:
+                    return self._json({"chyba": "Profil nenalezen"}, 404)
+                if st.get("profil"):
+                    st["zpravodaj"] = onboarding.zpravodaj(con, st["profil"])
+                return self._json(st)
+            if u.path.startswith("/api/vhodnost/"):
+                return self._json(onboarding.vhodnost_jedne(con, _ico_z_cesty(u.path), arg("zakazka", 200),
+                                                            vlastnik=self._vlastnik(self._admin())))
+            if u.path == "/api/diagnostika":
+                self._vyzaduj_admin()
+                ico = arg("ico", 12)
+                return self._json(diagnostika(con, bezpecnost.ico(ico) if ico else None))
+            if u.path == "/api/beh":
+                return self._json({k: JOB[k] for k in ("bezi", "rezim", "chyba", "zacatek", "konec")} | {"log": JOB["log"][-150:]})
+        finally:
+            con.close()
+        self._json({"chyba": "neznámý endpoint"}, 404)
+
+    # -------------------------------------------------------------- POST
+    def do_POST(self):
+        self._obsluz("POST", self._post)
+
+    def _post(self):
+        u = urlparse(self.path)
+        body = self._telo()
+        admin = self._admin()
+        if u.path == "/api/nastaveni":
+            self._vyzaduj_admin()
+            return self._json(nastaveni_set(body) | {"admin": True})
+        if u.path in ("/api/ai/modely", "/api/ai/test"):
+            self._vyzaduj_admin()
+            self._drahe()
+            return self._json(ai_akce(body, "modely" if u.path.endswith("modely") else "test"))
+        if u.path == "/api/aktualizovat":
+            self._vyzaduj_admin()
+            rezim = body.get("rezim", "rychle")
+            if rezim not in ("rychle", "plny"):
+                raise bezpecnost.ChybaVstupu("Neznámý režim aktualizace.")
+            if not spust_aktualizaci(rezim):
+                return self._json({"ok": False, "zprava": "Aktualizace už běží."}, 409)
+            log("Bezpecnost", f"aktualizace dat ({rezim}) spustena z {self._ip()}")
+            return self._json({"ok": True})
+        if u.path.startswith("/api/export/"):
+            self._drahe()
+            ico = _ico_z_cesty(u.path)
+            # na serveru se do slozky trezoru nezapisuje, jen se nabidne zip ke stazeni
+            return self._json(export_obsidian(ico, bool(body.get("zapsat", True)) and not SEC["verejne"], cfg_pro(admin)))
+        if u.path.startswith("/api/onboarding/"):
+            vlastnik = self._vlastnik(admin)
             con = connect(STATE["db"])
             try:
-                if u.path == "/api/stav":
-                    return self._json({**api.stav(con, STATE["demo"]), "aktualizace_bezi": JOB["bezi"]})
-                if u.path == "/api/hledat":
-                    return self._json(api.hledat(con, q.get("q", [""])[0],
-                                                 None if STATE["demo"] else STATE["cfg"]["zdroje"]["ares_base"]))
-                if u.path.startswith("/api/firma/"):
-                    ico = unquote(u.path.rsplit("/", 1)[-1])
-                    return self._json(api.profil(con, ico, STATE["cfg"], online=not STATE["demo"]))
-                if u.path == "/api/trh":
-                    return self._json(api.trh(con, q.get("segment", [None])[0] or None))
-                if u.path == "/api/nastaveni":
-                    return self._json(nastaveni_get())
-                if u.path.startswith("/api/export-zip/"):
-                    ico = unquote(u.path.rsplit("/", 1)[-1])
-                    if ico not in EXPORTS:
-                        return self._json({"chyba": "Export nejdřív vytvořte."}, 404)
-                    name, data = EXPORTS[ico]
-                    self.send_response(200)
-                    self.send_header("Content-Type", "application/zip")
-                    self.send_header("Content-Disposition", f'attachment; filename="{name}"')
-                    self.send_header("Content-Length", str(len(data)))
-                    self.end_headers()
-                    self.wfile.write(data)
-                    return
-                if u.path == "/api/onboarding":
-                    return self._json(onboarding.seznam(con))
-                if u.path.startswith("/api/onboarding/"):
-                    st = onboarding.nacti(con, unquote(u.path.rsplit("/", 1)[-1]))
-                    if not st:
-                        return self._json({"chyba": "Profil nenalezen"}, 404)
-                    if st.get("profil"):
-                        st["zpravodaj"] = onboarding.zpravodaj(con, st["profil"])
-                    return self._json(st)
-                if u.path.startswith("/api/vhodnost/"):
-                    return self._json(onboarding.vhodnost_jedne(con, unquote(u.path.rsplit("/", 1)[-1]), q.get("zakazka", [""])[0]))
-                if u.path == "/api/diagnostika":
-                    return self._json(diagnostika(con, q.get("ico", [None])[0]))
-                if u.path == "/api/beh":
-                    return self._json({k: JOB[k] for k in ("bezi", "rezim", "chyba", "zacatek", "konec")} | {"log": JOB["log"][-150:]})
+                if u.path == "/api/onboarding/start":
+                    self._drahe()
+                    ico = bezpecnost.ico(body.get("ico"))
+                    web = bezpecnost.over_url(body.get("web")) if (body.get("web") and not STATE["demo"]) else None
+                    return self._json(onboarding.start(con, cfg_pro(admin), ico, web, online=not STATE["demo"],
+                                                       vlastnik=vlastnik, llm_povolit=LLM_DEN.vezmi))
+                if u.path == "/api/onboarding/dokoncit":
+                    self._drahe()
+                    return self._json(onboarding.dokonci(con, cfg_pro(admin), bezpecnost.ico(body.get("ico")),
+                                                         bezpecnost.odpovedi(body.get("odpovedi") or {}),
+                                                         vlastnik=vlastnik, llm_povolit=LLM_DEN.vezmi))
+                if u.path.endswith("/profil"):
+                    profil = body.get("profil")
+                    if not isinstance(profil, dict):
+                        raise bezpecnost.ChybaVstupu("Neplatný profil.")
+                    ico = bezpecnost.ico(unquote(u.path.split("/")[3]))
+                    return self._json(onboarding.uloz_profil(con, ico, profil, vlastnik=vlastnik))
             finally:
                 con.close()
-            self._json({"chyba": "neznamy endpoint"}, 404)
-        except ValueError as e:
-            self._json({"chyba": str(e)}, 400)
-        except Exception as e:
-            traceback.print_exc()
-            self._json({"chyba": str(e)}, 500)
+        self._json({"chyba": "neznámý endpoint"}, 404)
 
-    def do_POST(self):
-        u = urlparse(self.path)
-        n = int(self.headers.get("Content-Length") or 0)
-        body = json.loads(self.rfile.read(n) or b"{}")
-        try:
-            if u.path == "/api/nastaveni":
-                return self._json(nastaveni_set(body))
-            if u.path.startswith("/api/onboarding/"):
-                con = connect(STATE["db"])
-                try:
-                    if u.path == "/api/onboarding/start":
-                        return self._json(onboarding.start(con, STATE["cfg"], body.get("ico", ""), body.get("web") or None,
-                                                           online=not STATE["demo"]))
-                    if u.path == "/api/onboarding/dokoncit":
-                        return self._json(onboarding.dokonci(con, STATE["cfg"], body.get("ico", ""), body.get("odpovedi") or {}))
-                    if u.path.endswith("/profil"):
-                        return self._json(onboarding.uloz_profil(con, unquote(u.path.split("/")[3]), body.get("profil") or {}))
-                finally:
-                    con.close()
-            if u.path.startswith("/api/export/"):
-                return self._json(export_obsidian(unquote(u.path.rsplit("/", 1)[-1]), bool(body.get("zapsat", True))))
-        except ValueError as e:
-            return self._json({"chyba": str(e)}, 400)
-        except Exception as e:
-            traceback.print_exc()
-            return self._json({"chyba": str(e)}, 500)
-        if u.path != "/api/aktualizovat":
-            return self._json({"chyba": "neznamy endpoint"}, 404)
-        rezim = body.get("rezim", "rychle")
-        with JOB_LOCK:
-            if JOB["bezi"]:
-                return self._json({"ok": False, "zprava": "Aktualizace uz bezi."}, 409)
-            JOB.update({"bezi": True, "rezim": rezim, "log": [], "chyba": None,
-                        "zacatek": datetime.now().isoformat(timespec="seconds"), "konec": None})
-        threading.Thread(target=run_update, args=(rezim,), daemon=True).start()
-        self._json({"ok": True})
+    def do_PUT(self):
+        self._obsluz("PUT", lambda: self._json({"chyba": "metoda není povolena"}, 405))
+
+    do_DELETE = do_PATCH = do_PUT
+
+    def do_OPTIONS(self):
+        # zadne CORS: API smi volat jen nase vlastni stranka (same-origin)
+        self._obsluz("OPTIONS", lambda: self._json({"chyba": "CORS není povolen"}, 405))
+
+
+def spust_aktualizaci(rezim):
+    with JOB_LOCK:
+        if JOB["bezi"]:
+            return False
+        JOB.update({"bezi": True, "rezim": rezim, "log": [], "chyba": None,
+                    "zacatek": datetime.now().isoformat(timespec="seconds"), "konec": None})
+    threading.Thread(target=run_update, args=(rezim,), daemon=True).start()
+    return True
 
 
 def main():
+    env = os.environ.get
     p = argparse.ArgumentParser()
-    p.add_argument("--demo", action="store_true", help="umela data bez internetu")
-    p.add_argument("--port", type=int, default=8765)
+    p.add_argument("--demo", action="store_true", default=env("TS_DEMO") == "1", help="umela data bez internetu")
+    p.add_argument("--port", type=int, default=int(env("PORT") or 8765))
+    p.add_argument("--host", default=env("TS_HOST") or "127.0.0.1", help="0.0.0.0 = prijimat spojeni zvenku (server)")
     p.add_argument("--neotvirat", action="store_true")
+    p.add_argument("--auto-aktualizace", default=env("TS_AUTO_AKTUALIZACE") or "",
+                   help="'rychle' nebo 'plny': pri prazdne databazi hned po startu stahne data (pro server)")
     a = p.parse_args()
+    if a.host not in ("127.0.0.1", "localhost", "::1") and not SEC["verejne"]:
+        # fail closed: server dostupny zvenku je vzdy v rezimu online verze (zapisy jen s heslem)
+        SEC["verejne"] = True
     STATE["cfg"] = load_config()
     if a.demo:
         STATE["demo"] = True
@@ -372,12 +692,29 @@ def main():
             print("Pripravuji demo data (jednou, par sekund)...")
             import demo
             demo.build_demo_db(STATE["db"])
+    pripravena = os.path.join(ROOT, "predpripravena_db", "tenderscope.db.gz")
+    if not a.demo and not os.path.exists(STATE["db"]) and os.path.exists(pripravena):
+        # server: zabalena databaze nahrana spolu s aplikaci (pripravit_db.py) -> rozbalime do data/
+        import gzip
+        import shutil
+        print("Rozbaluji predpripravenou databazi z predpripravena_db/ ...")
+        with gzip.open(pripravena, "rb") as g, open(STATE["db"] + ".tmp", "wb") as f:
+            shutil.copyfileobj(g, f)
+        os.replace(STATE["db"] + ".tmp", STATE["db"])
     con = connect(STATE["db"])
     if con.execute("SELECT COUNT(*) FROM dodavatele").fetchone()[0] == 0 and con.execute("SELECT COUNT(*) FROM vitezove").fetchone()[0] > 0:
         api.rebuild_index(con)  # databaze z prikazove radky -> doplnime index
+    prazdna = con.execute("SELECT COUNT(*) FROM zakazky").fetchone()[0] == 0
     con.close()
-    srv = ThreadingHTTPServer(("127.0.0.1", a.port), Handler)
+    if a.auto_aktualizace in ("rychle", "plny") and prazdna and not a.demo:
+        print(f"Databaze je prazdna -> spoustim automatickou aktualizaci ({a.auto_aktualizace})")
+        spust_aktualizaci(a.auto_aktualizace)
+    srv = ThreadingHTTPServer((a.host, a.port), Handler)
     url = f"http://127.0.0.1:{a.port}/"
+    if SEC["verejne"]:
+        print("  Online verze: zapisy jen s admin heslem" + ("" if SEC["heslo"] else " (TS_ADMIN_HESLO neni nastaveno -> jen prohlizeni)"))
+        if SEC["heslo"] and len(SEC["heslo"]) < 12:
+            print("  VAROVANI: admin heslo je kratke, pouzijte aspon 12 znaku.")
     print(f"\n  TenderScope bezi na {url}  ({'DEMO data' if a.demo else 'realna data'})")
     print("  Aplikaci ukoncite zavrenim tohoto okna nebo Ctrl+C.\n")
     if not a.neotvirat:

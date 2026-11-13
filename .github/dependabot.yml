@@ -1,0 +1,23 @@
+# Pravidelne aktualizace zavislosti pres pull request (prednaska, slajd 54).
+# Kazdy PR od Dependabota projde testy a audity v CI; slucuje se az po kontrole.
+version: 2
+updates:
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "npm"
+    directory: "/web"
+    schedule:
+      interval: "weekly"
+    groups:
+      frontend:
+        patterns: ["*"]
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"

@@ -3,7 +3,6 @@
 Pouziti (Windows: misto python3 pis python):
     python tenderscope.py run                     # stahne vse a vytvori brief (obor z config.json)
     python tenderscope.py run --obor stavebnictvi --mesice 12
-    python tenderscope.py run --rychle            # rychly beh: 3 mesice, bez Registru smluv
     python tenderscope.py run --bez-stahovani     # jen prepocita analyzu z jiz stazenych dat
     python tenderscope.py run --tydenni --ano     # tydenni brief, bez dotazu na schvaleni
     python tenderscope.py firma 27082440          # profil firmy z ARES
@@ -28,9 +27,6 @@ def cmd_run(a):
     cfg = load_config(a.config)
     if a.obor:
         cfg["obor"] = a.obor
-    if a.rychle:
-        # rychly rezim: posledni 3 mesice, bez velkych dumpu Registru smluv, mene dotazu na ARES/zpravy
-        cfg.update({"mesice": 3, "smlouvy_mesice": 0, "ares_max_firem": 20, "zpravy_max_konkurentu": 3})
     if a.mesice:
         cfg["mesice"] = a.mesice
     if a.smlouvy_mesice is not None:
@@ -77,7 +73,6 @@ def main():
 
     r = sub.add_parser("run", help="spusti cely workflow agentu")
     r.add_argument("--obor", choices=["it", "stavebnictvi"])
-    r.add_argument("--rychle", action="store_true", help="rychly beh: 3 mesice, bez Registru smluv (par minut)")
     r.add_argument("--mesice", type=int, help="kolik mesicu zpet (vychozi 12)")
     r.add_argument("--smlouvy-mesice", type=int, dest="smlouvy_mesice", help="kolik mesicu Registru smluv (dumpy jsou velke)")
     r.add_argument("--ico", help="IČO vasi firmy pro KIQ 5")

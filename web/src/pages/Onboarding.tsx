@@ -17,8 +17,8 @@ const VERT: Record<string, string> = {
 
 function AgentBadge({ a }: { a: AgentInfo | null }) {
   if (!a) return null;
-  return a.rezim === "claude"
-    ? <span className="badge good" title={`${a.vstup_tokenu ?? "?"} vstupních / ${a.vystup_tokenu ?? "?"} výstupních tokenů`}>Agent: Claude ({a.model})</span>
+  return a.rezim === "llm" || a.rezim === "claude"
+    ? <span className="badge good" title={`${a.vstup_tokenu ?? "?"} vstupních / ${a.vystup_tokenu ?? "?"} výstupních tokenů`}>Agent: {a.poskytovatel ?? "AI"} ({a.model})</span>
     : <span className="badge neutral" title={a.duvod}>Agent: pravidla{a.duvod ? ` – ${a.duvod}` : ""}</span>;
 }
 

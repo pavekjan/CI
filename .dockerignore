@@ -1,0 +1,12 @@
+data/
+vystupy/
+web/node_modules/
+.venv/
+venv/
+**/__pycache__/
+*.pyc
+.git/
+.env
+.env.*
+config.local.json
+.github/

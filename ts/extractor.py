@@ -7,15 +7,10 @@ nazvy nadrazenych objektu). Prikaz `python tenderscope.py inspect` vypise skutec
 aby slo pravidla pripadne doladit v KEY_RULES nize.
 """
 import re
-from functools import lru_cache
 
 from .util import clean_ico, ico_valid, nkey, norm, nuts_to_kraj, parse_date, to_float
 
 CPV_RE = re.compile(r"^\d{8}(-\d)?$")
-CPV_FULL = re.compile(r"^\d{8}-\d$")  # CPV s kontrolni cislici - jinde se tento tvar nevyskytuje
-SUPPLIER_KEY = ("dodavatel", "ucastn", "uchazec", "vitez", "vybran", "subjekt", "contractor", "bidder", "tenderer",
-                "smluvnistran", "konsorc", "spolecnik")
-EXTRACTOR_VERZE = 2  # zvyseni = znovu zpracovat uz stazene soubory
 
 # kontext (nazvy nadrazenych klicu), ve kterem hledame dodavatele / ucastniky
 WINNER_CTX = ("dodavatel", "vitez", "vybran", "smluvnistrana", "uzavrenasmlouva", "smlouv", "contractor", "winner")
@@ -46,59 +41,28 @@ def walk_dicts(obj, path=()):
             yield from walk_dicts(v, path)
 
 
-# podstromy, ve kterych nikdy nejsou udaje o zakazce/vitezi a jsou obrovske (desitky dokumentu,
-# historie zmen...) - jejich prochazeni zpomalovalo zpracovani az 10x
-PRUNE = ("dokument", "priloh", "soubor", "historie", "vysvetlen", "komunik", "kontaktniosob")
-
-
-@lru_cache(maxsize=20000)
-def _nk(k):
-    return nkey(k)
-
-
-def _flatten(rec):
-    """Jeden pruchod zaznamem (v poradi dokumentu): listy (hloubka, klic, kontext, hodnota)
-    a objekty (kontext, dict, index rodicovskeho objektu). Klice se normalizuji jen jednou."""
-    leaves, dicts = [], []
-
-    def rec_walk(obj, ctxp, parent):
-        if isinstance(obj, dict):
-            ctx = "/".join(ctxp)
-            me = len(dicts)
-            dicts.append((ctx, obj, parent))
-            for k, v in obj.items():
-                kk = _nk(str(k))
-                if any(w in kk for w in PRUNE):
-                    continue
-                if isinstance(v, (dict, list)):
-                    rec_walk(v, ctxp + (kk,), me)
-                else:
-                    leaves.append((len(ctxp) + 1, kk, ctx, v))
-        elif isinstance(obj, list):
-            for v in obj:
-                if isinstance(v, (dict, list)):
-                    rec_walk(v, ctxp, parent)
-                elif ctxp:
-                    leaves.append((len(ctxp), ctxp[-1], "/".join(ctxp[:-1]), v))
-
-    rec_walk(rec, (), None)
-    return leaves, dicts
+def _ctx(path):
+    return "/".join(nkey(p) for p in path)
 
 
 def _pick(leaves, key_test, ctx_test=None, value_test=None, prefer_short=True):
-    best = None
-    for depth, k, ctx, val in leaves:
-        if val is None or val == "":
+    cands = []
+    for path, val in leaves:
+        if not path or val in (None, ""):
             continue
+        k = nkey(path[-1])
+        ctx = _ctx(path[:-1])
         if not key_test(k):
             continue
         if ctx_test and not ctx_test(ctx):
             continue
         if value_test and not value_test(val):
             continue
-        if best is None or depth < best[0]:
-            best = (depth, val)
-    return best[1] if best else None
+        cands.append((len(path), path, val))
+    if not cands:
+        return None
+    cands.sort(key=lambda c: c[0] if prefer_short else -c[0])
+    return cands[0][2]
 
 
 def _not_in(*words):
@@ -115,7 +79,7 @@ def _num(v):
 
 def _dict_ico(d):
     for k, v in d.items():
-        kk = _nk(k)
+        kk = nkey(k)
         if kk in ("ico", "icododavatele", "icozadavatele", "identifikacnicislo", "ic") or kk.endswith("ico"):
             ico = clean_ico(v)
             if ico:
@@ -125,7 +89,7 @@ def _dict_ico(d):
 
 def _dict_name(d):
     for k, v in d.items():
-        kk = _nk(k)
+        kk = nkey(k)
         if isinstance(v, str) and (kk in ("nazev", "obchodnijmeno", "jmeno", "name", "nazevdodavatele", "nazevzadavatele",
                                           "uredninazev", "nazevfirmy") or kk.startswith("nazev")):
             return v.strip()
@@ -135,13 +99,13 @@ def _dict_name(d):
 def _dict_price(d):
     best = None
     for k, v in d.items():
-        kk = _nk(k)
+        kk = nkey(k)
         if ("cena" in kk or "hodnota" in kk or "price" in kk) and "predpokl" not in kk and "odhad" not in kk:
             f = to_float(v) if not isinstance(v, dict) else None
             if f is None and isinstance(v, dict):
                 f = to_float(v.get("hodnota") or v.get("castka") or v.get("value"))
-            if f is not None and f >= 1000:  # 1 Kc apod. = zastupna hodnota
-                score = 3 if "bezdph" in kk else 1 if ("sdph" in kk or "vcetnedph" in kk) else 2
+            if f is not None and f > 0:
+                score = 2 if "bezdph" in kk else 1
                 if best is None or score > best[0]:
                     best = (score, f)
     return best[1] if best else None
@@ -153,7 +117,7 @@ def _truthy(v):
 
 def extract(rec, zdroj="rvz"):
     """Vrati (zakazka_dict, vitezove_list, ucastnici_list)."""
-    leaves, dicts = _flatten(rec)
+    leaves = list(walk(rec))
 
     zid = _pick(leaves, lambda k: k in ("id", "idvz", "kodvz", "systemoveciselnevz", "idzakazky", "evidencnicislo",
                                          "kodrvz", "identifikatorvz", "rvzid", "idrvz"),
@@ -170,8 +134,9 @@ def extract(rec, zdroj="rvz"):
 
     # zadavatel
     zad_ico = zad_nazev = None
-    for ctx, d, _p in dicts:
-        if any(w in ctx for w in AUTHORITY_CTX) or any(_nk(k).startswith("icozadavatel") for k in d):
+    for path, d in walk_dicts(rec):
+        ctx = _ctx(path)
+        if any(w in ctx for w in AUTHORITY_CTX) or any(nkey(k).startswith("icozadavatel") for k in d):
             zad_ico = zad_ico or _dict_ico(d)
             zad_nazev = zad_nazev or _dict_name(d)
             if zad_ico and zad_nazev:
@@ -181,10 +146,11 @@ def extract(rec, zdroj="rvz"):
 
     # CPV
     cpvs = []
-    for _, k, ctx, val in leaves:
-        if isinstance(val, (str, int)):
+    for path, val in leaves:
+        ctx = _ctx(path)
+        if "cpv" in ctx and isinstance(val, (str, int)):
             s = str(val).strip()
-            if (("cpv" in ctx or "cpv" in k) and CPV_RE.match(s)) or CPV_FULL.match(s):
+            if CPV_RE.match(s):
                 s = s[:8]
                 if s not in cpvs:
                     cpvs.append(s)
@@ -227,67 +193,46 @@ def extract(rec, zdroj="rvz"):
 
     # hodnotici kriteria
     kriteria = []
-    for ctx, d, _p in dicts:
-        if "kriteri" in ctx:
+    for path, d in walk_dicts(rec):
+        if "kriteri" in _ctx(path):
             n = _dict_name(d) or d.get("popis") or d.get("text")
             if isinstance(n, str) and n.strip() and n.strip() not in kriteria:
                 vaha = None
                 for k, v in d.items():
-                    if "vah" in _nk(k) or "weight" in _nk(k):
+                    if "vah" in nkey(k) or "weight" in nkey(k):
                         vaha = to_float(v)
                 kriteria.append(f"{n.strip()}" + (f" ({vaha:g} %)" if vaha else ""))
-    for _, k, _c, val in leaves:
-        if "kriteri" in k and isinstance(val, str) and val.strip() and val not in kriteria and len(val) < 200:
+    for path, val in leaves:
+        if "kriteri" in nkey(path[-1]) and isinstance(val, str) and val.strip() and val not in kriteria and len(val) < 200:
             kriteria.append(val.strip())
 
     # vitezove a ucastnici
-    # Pravidla (z realnych dat RVZ): dodavatel je jen objekt pod klicem typu dodavatel/ucastnik/vitez...
-    # s IČO nebo nazvem firmy. Objekty smluv a casti maji take "nazev" a "cenu" - ty NEJSOU dodavatele
-    # (jinak by se mezi "rivaly" objevily nazvy zakazek). Cena viteze muze byt o uroven vys (smlouva/cast).
     vitezove, ucastnici = {}, {}
-    nazev_n = norm(nazev)
-    pouzite_ceny = set()
-    for i, (ctx, d, par) in enumerate(dicts):
+    for path, d in walk_dicts(rec):
+        ctx = _ctx(path)
         if any(w in ctx for w in AUTHORITY_CTX):
             continue
-        last = ctx.rsplit("/", 1)[-1]
-        supplierish = any(w in last for w in SUPPLIER_KEY)
         ico = _dict_ico(d)
         name = _dict_name(d)
-        if not supplierish and not (ico and any(w in ctx for w in WINNER_CTX + BIDDER_CTX)):
-            continue
         if not ico and not name:
             continue
-        if name and nazev_n and norm(name) == nazev_n:
-            name = None
-            if not ico:
-                continue
-        if ico and ico == zad_ico:
-            continue
-        is_winner_flag = any(("vybran" in _nk(k) or "vitez" in _nk(k) or "uspesn" in _nk(k)) and _truthy(v)
+        is_winner_flag = any(("vybran" in nkey(k) or "vitez" in nkey(k) or "uspesn" in nkey(k)) and _truthy(v)
                              for k, v in d.items())
         key = (ico or "", (name or "").strip())
         price = _dict_price(d)
-        bidder = any(w in ctx for w in BIDDER_CTX) and not any(w in ctx for w in ("vitez", "vybran", "smlouv"))
-        if bidder:
+        if any(w in ctx for w in BIDDER_CTX) and not any(w in ctx for w in ("dodavatel", "vitez", "vybran")):
             ucastnici[key] = price
-            if not is_winner_flag:
+            if is_winner_flag:
+                vitezove[key] = price
+        elif any(w in ctx for w in WINNER_CTX) or is_winner_flag:
+            if ico == zad_ico:
                 continue
-        elif not (any(w in ctx for w in WINNER_CTX) or is_winner_flag or "dodavatel" in last):
-            continue
-        if price is None:  # cena smlouvy/casti o uroven(e) vys - jen pro prvniho dodavatele te smlouvy
-            p, hop = par, 0
-            while p is not None and hop < 3 and price is None:
-                if p not in pouzite_ceny:
-                    price = _dict_price(dicts[p][1])
-                    if price is not None:
-                        pouzite_ceny.add(p)
-                p, hop = dicts[p][2], hop + 1
-        vitezove[key] = price if price is not None else vitezove.get(key)
+            # cena muze byt i v nadrazenem objektu (smlouva -> dodavatel)
+            vitezove[key] = price if price is not None else vitezove.get(key)
     if not any(v for v in vitezove.values()):
         cena = _pick(leaves, lambda k: ("cena" in k or "hodnota" in k) and any(w in k for w in ("smluv", "konecn", "vysled"))
                      and "predpokl" not in k, value_test=_num)
-        if cena is not None and len(vitezove) == 1 and (to_float(cena) or 0) >= 1000:
+        if cena is not None and len(vitezove) == 1:
             k0 = next(iter(vitezove))
             vitezove[k0] = to_float(cena)
 
@@ -305,10 +250,10 @@ def extract(rec, zdroj="rvz"):
         "stav": stav,
         "nuts": nuts,
         "kraj": nuts_to_kraj(nuts),
-        "predpokladana_hodnota": (to_float(hodnota) if (to_float(hodnota) or 0) >= 1000 else None),  # "1 Kč" = nevyplneno
+        "predpokladana_hodnota": to_float(hodnota),
         "datum_zahajeni": (parse_date(datum).isoformat() if parse_date(datum) else None),
         "lhuta_nabidek": (str(lhuta)[:19] if lhuta else None),
-        "pocet_nabidek": (int(to_float(pocet)) if pocet is not None and to_float(pocet) > 0 else None),  # 0 = neuvedeno
+        "pocet_nabidek": int(to_float(pocet)) if pocet is not None else None,
         "kriteria": " | ".join(kriteria[:8]),
         "url": url,
     }

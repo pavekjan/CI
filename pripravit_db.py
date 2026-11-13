@@ -1,0 +1,77 @@
+"""Pripravi zmensenou kopii databaze pro online verzi (GitHub pres prohlizec bere soubory max. 25 MB).
+
+    python pripravit_db.py              # vezme data/tenderscope.db -> predpripravena_db/tenderscope.db.gz
+
+Puvodni databaze zustane beze zmeny. Kdyz je vysledek moc velky, skript postupne
+vynecha Registr smluv a pak starsi zakazky, dokud se nevejde pod limit.
+"""
+import gzip
+import os
+import shutil
+import sqlite3
+import sys
+
+ROOT = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, ROOT)
+ZDROJ = os.path.join(ROOT, "data", "tenderscope.db")
+CIL_DIR = os.path.join(ROOT, "predpripravena_db")
+CIL = os.path.join(CIL_DIR, "tenderscope.db.gz")
+TMP = os.path.join(ROOT, "data", "_online_kopie.db")
+LIMIT_MB = 24  # GitHub pres prohlizec bere soubory max. 25 MB
+
+
+def gz_velikost(path):
+    with open(path, "rb") as f, gzip.open(CIL, "wb", compresslevel=9) as g:
+        shutil.copyfileobj(f, g)
+    return os.path.getsize(CIL) / 1e6
+
+
+def smaz_stare(con, mesicu):
+    con.execute("DELETE FROM zakazky WHERE COALESCE(datum_zahajeni, lhuta_nabidek, '') < date('now', ?)", (f"-{mesicu} months",))
+    for t in ("vitezove", "ucastnici"):
+        # bezpecnost: t je konstanta z kodu, ne vstup (vedome potlaceni nalezu banditu, viz SECURITY.md)
+        con.execute(f"DELETE FROM {t} WHERE zakazka_id NOT IN (SELECT id FROM zakazky)")  # nosec B608
+    con.execute("DELETE FROM priznaky WHERE objekt_typ='zakazka' AND objekt_id NOT IN (SELECT id FROM zakazky)")
+
+
+def main():
+    if not os.path.exists(ZDROJ):
+        print("Nenasel jsem data/tenderscope.db. Nejdriv v aplikaci spustte aktualizaci dat.")
+        return 1
+    os.makedirs(CIL_DIR, exist_ok=True)
+    if os.path.exists(TMP):
+        os.remove(TMP)
+    print("Kopiruji databazi...")
+    src = sqlite3.connect(ZDROJ)
+    src.execute("VACUUM INTO ?", (TMP,))
+    src.close()
+    con = sqlite3.connect(TMP)
+    con.execute("DELETE FROM zpravy")
+    kroky = [("bez Registru smluv", lambda: (con.execute("DELETE FROM smlouvy_strany"), con.execute("DELETE FROM smlouvy")))]
+    kroky += [(f"jen zakazky za poslednich {m} mesicu", (lambda m=m: smaz_stare(con, m))) for m in (12, 6, 3)]
+    popis = "cela databaze"
+    while True:
+        con.commit()
+        con.execute("VACUUM")
+        mb = gz_velikost(TMP)
+        print(f"  {popis}: {mb:.1f} MB (zabaleno)")
+        if mb <= LIMIT_MB or not kroky:
+            break
+        popis, krok = kroky.pop(0)
+        krok()
+        if popis.startswith("jen"):
+            from ts import api
+            api.rebuild_index(con)
+    con.close()
+    os.remove(TMP)
+    if mb > LIMIT_MB:
+        os.remove(CIL)
+        print("Ani zmensena databaze se nevesla do 25 MB. Online verze si data stahne sama po startu.")
+        return 1
+    print(f"\nHotovo: predpripravena_db/tenderscope.db.gz ({mb:.1f} MB, {popis}).")
+    print("Nahrajte tento soubor na GitHub spolu s aplikaci (slozka predpripravena_db).")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

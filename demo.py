@@ -31,59 +31,44 @@ def make_ico(seed):
     return base + str(c)
 
 
-# (nazev, segmenty, sila) - sila > 1 = casteji vyhrava
-_F = [
-    ("Alfa Software s.r.o.", "it", 1.0), ("Beta Systems a.s.", "it", 1.5), ("Gama Cloud s.r.o.", "it", 0.9),
-    ("Delta IT Services a.s.", "it", 1.1), ("Epsilon Data s.r.o.", "it,hw", 1.0), ("Zeta Networks s.r.o.", "it,hw", 0.9),
-    ("Theta Consulting a.s.", "it,sluzby", 1.2), ("Kappa Digital s.r.o.", "it,sluzby", 0.8), ("Lambda Infra a.s.", "hw", 1.0),
-    ("Omega Soft s.r.o.", "it", 1.1), ("Stavby Horizont a.s.", "stavby", 1.6), ("Silnice Demo s.r.o.", "stavby", 1.2),
-    ("Pozemní stavby Vzor s.r.o.", "stavby", 1.0), ("Inženýring Plus s.r.o.", "stavby,projekt", 1.1),
-    ("Projekce Atelier s.r.o.", "projekt", 1.3), ("MedTech Ukázka a.s.", "zdravi", 1.4), ("Lékárenská Demo s.r.o.", "zdravi", 1.0),
-    ("Čistota Příklad s.r.o.", "sluzby", 1.0), ("Energo Modelová a.s.", "stavby,hw", 0.9), ("Kancelář Fikce s.r.o.", "hw,sluzby", 0.8),
-]
-FIRMY = [(make_ico(2710000 + i * 37), n, set(seg.split(",")), sila) for i, (n, seg, sila) in enumerate(_F)]
-NASE = FIRMY[4]
+FIRMY = [(make_ico(2710000 + i * 37), n) for i, n in enumerate([
+    "Alfa Software s.r.o.", "Beta Systems a.s.", "Gama Cloud s.r.o.", "Delta IT Services a.s.", "Epsilon Data s.r.o.",
+    "Zeta Networks s.r.o.", "Theta Consulting a.s.", "Kappa Digital s.r.o.", "Lambda Infra a.s.", "Omega Soft s.r.o."])]
+NASE = FIRMY[4]  # "Epsilon Data" = nase firma v demu
 ZADAVATELE = [(make_ico(6000000 + i * 101), n) for i, n in enumerate([
     "Město Příkladov", "Krajský úřad Ukázkového kraje", "Ministerstvo pro demo data", "Nemocnice Vzorová, p.o.",
-    "Vysoká škola Fiktivní", "Statutární město Testín", "Správa dat Demo, s.p.o.", "Obec Modelová",
-    "Dopravní podnik Ukázka, a.s.", "Fakultní nemocnice Demo", "Ředitelství silnic Vzorového kraje", "Městská část Praha-Fikce"])]
-NUTS = ["CZ010", "CZ020", "CZ064", "CZ080", "CZ071", "CZ032", "CZ052", "CZ042", "CZ063"]
-PREDMETY = [("72212000", "it", "Vývoj a podpora informačního systému – {}"), ("72253000", "it", "Servisní podpora a helpdesk – {}"),
-            ("48000000", "it", "Dodávka licencí software – {}"), ("30213100", "hw", "Dodávka notebooků – {}"),
-            ("72317000", "it", "Cloudové služby a hosting – {}"), ("32420000", "hw", "Rozšíření sítě LAN – {}"),
-            ("45233140", "stavby", "Rekonstrukce komunikace – {}"), ("45214000", "stavby", "Stavební úpravy budovy – {}"),
-            ("45232400", "stavby", "Kanalizace a vodovod – {}"), ("71240000", "projekt", "Projektová dokumentace – {}"),
-            ("71520000", "projekt", "Technický dozor stavebníka – {}"), ("33100000", "zdravi", "Zdravotnické přístroje – {}"),
-            ("33600000", "zdravi", "Léčivé přípravky – {}"), ("90910000", "sluzby", "Úklidové služby – {}"),
-            ("79340000", "sluzby", "Marketingová kampaň – {}")]
+    "Vysoká škola Fiktivní", "Statutární město Testín", "Správa dat Demo, s.p.o.", "Obec Modelová"])]
+NUTS = ["CZ010", "CZ020", "CZ064", "CZ080", "CZ071", "CZ032", "CZ052"]
+PREDMETY = [("72212000", "Vývoj a podpora informačního systému {}"), ("72253000", "Servisní podpora a helpdesk pro {}"),
+            ("48000000", "Dodávka licencí software pro {}"), ("30213100", "Dodávka notebooků pro {}"),
+            ("72317000", "Cloudové služby a hosting pro {}"), ("72700000", "Rozšíření sítě LAN v budově {}"),
+            ("45000000", "Rekonstrukce chodníku u budovy {}"), ("79342000", "Kampaň a marketing {}")]
 STAVY = ["Zadána", "Zadána", "Zadána", "Zadána", "Zrušena", "Probíhá"]
 POSTUPY = ["Otevřené řízení", "Zjednodušené podlimitní řízení", "Zakázka malého rozsahu", "Jednací řízení bez uveřejnění"]
 
 
 def gen_records(y, m, rnd, start_id):
     recs = []
-    for i in range(rnd.randint(45, 70)):
-        cpv, seg, tpl = rnd.choice(PREDMETY)
+    for i in range(rnd.randint(18, 30)):
+        cpv, tpl = rnd.choice(PREDMETY)
         zad = rnd.choice(ZADAVATELE)
-        nasobek = 4 if seg == "stavby" else 1
-        hod = round(rnd.choice([0.4, 0.8, 1.5, 2.5, 4, 7, 12, 25]) * nasobek * 1e6 * rnd.uniform(0.8, 1.2), -3)
+        hod = round(rnd.choice([0.4, 0.8, 1.5, 2.5, 4, 7, 12, 25]) * 1e6 * rnd.uniform(0.8, 1.2), -3)
         start = min(date(y, m, rnd.randint(1, 28)), date.today() - timedelta(days=rnd.randint(0, 10)))
         lhuta = start + timedelta(days=rnd.randint(15, 40))
         stav = rnd.choice(STAVY)
         if lhuta >= date.today():
             stav = "Probíhá"
-        kandidati = [f for f in FIRMY if seg in f[2]]
-        uchazeci = rnd.sample(kandidati, rnd.randint(1, min(5, len(kandidati))))
-        if zad[1].startswith("Statutární") and seg == "it" and FIRMY[1] not in uchazeci and rnd.random() < .8:
-            uchazeci = [FIRMY[1]] + uchazeci[:4]  # Beta Systems "dvorni dodavatel" Testína
+        uchazeci = rnd.sample(FIRMY, rnd.randint(1, 5))
+        if zad[1].startswith("Statutární") and rnd.random() < .8:
+            uchazeci = [FIRMY[1]] + [f for f in uchazeci if f != FIRMY[1]]  # Beta dominuje u Testína
         ceny = {f[0]: round(hod * rnd.uniform(0.7, 1.05), -2) for f in uchazeci}
-        vitez = min(uchazeci, key=lambda f: ceny[f[0]] / (f[3] ** 0.5) * rnd.uniform(0.85, 1.15))
+        vitez = min(uchazeci, key=lambda f: ceny[f[0]] * (0.85 if f == FIRMY[1] else 1))
         krit = [{"nazev": "Nabídková cena", "vaha": 100}] if rnd.random() < .6 else \
                [{"nazev": "Nabídková cena", "vaha": 70}, {"nazev": "Kvalita realizačního týmu", "vaha": 30}]
         cast = {
             "cisloCasti": 1,
             "cpvHlavni": cpv,
-            "cpvVedlejsi": [],
+            "cpvVedlejsi": ["72000000"] if cpv.startswith("72") else [],
             "hodnoticiKriteria": krit,
             "pocetObdrzenychNabidek": len(uchazeci) if stav != "Probíhá" else None,
         }
@@ -98,7 +83,7 @@ def gen_records(y, m, rnd, start_id):
             "idVZ": rid,
             "nazevVZ": tpl.format(zad[1]),
             "zadavatel": {"ico": zad[0], "uredniNazev": zad[1]},
-            "druhVZ": "Stavební práce" if cpv.startswith("45") else ("Dodávky" if cpv.startswith(("30", "32", "33", "48")) else "Služby"),
+            "druhVZ": "Stavební práce" if cpv.startswith("45") else ("Dodávky" if cpv.startswith(("30", "48")) else "Služby"),
             "rezimVZ": "Podlimitní" if hod < 13e6 else "Nadlimitní",
             "druhZadavacihoPostupu": rnd.choice(POSTUPY),
             "stavVZ": stav,
@@ -177,15 +162,11 @@ def write_index(port, today):
 <odkaz>http://127.0.0.1:{port}/smlouvy/dump_demo.xml</odkaz></dump></index>""")
     ares = os.path.join(DEMO_DIR, "ares")
     os.makedirs(ares, exist_ok=True)
-    kraje = [("Hlavní město Praha", "110 00 Praha 1"), ("Jihomoravský kraj", "602 00 Brno"), ("Moravskoslezský kraj", "702 00 Ostrava")]
-    nace_seg = [("stavby", ["41200", "42110"]), ("projekt", ["71120"]), ("zdravi", ["46460"]), ("sluzby", ["81210", "73110"]),
-                ("hw", ["46510", "62090"]), ("it", ["62010", "62020"])]
-    for i, (ico, nazev, segs, *_x) in enumerate(FIRMY):
-        nace = next((n for sg, n in nace_seg if sg in segs), ["62010"])
-        kraj, mesto = kraje[i % 3]
+    kraje = ["Hlavní město Praha", "Jihomoravský kraj", "Moravskoslezský kraj"]
+    for i, (ico, nazev) in enumerate(FIRMY):
         with open(os.path.join(ares, ico), "w", encoding="utf-8") as f:
-            json.dump({"ico": ico, "obchodniJmeno": nazev, "sidlo": {"textovaAdresa": f"Demo ulice {i + 1}, {mesto}",
-                       "nazevKraje": kraj}, "czNace2008": nace, "pravniForma": "112",
+            json.dump({"ico": ico, "obchodniJmeno": nazev, "sidlo": {"textovaAdresa": f"Demo ulice {i + 1}, Praha",
+                       "nazevKraje": kraje[i % 3]}, "czNace2008": ["62010", "62020"], "pravniForma": "112",
                        "datumVzniku": "2010-01-01", **({"datumZaniku": "2026-06-30"} if i == 9 else {})}, f, ensure_ascii=False)
     with open(os.path.join(DEMO_DIR, "rss.xml"), "w", encoding="utf-8") as f:
         f.write("""<?xml version="1.0"?><rss><channel>
@@ -204,80 +185,43 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
         return super().translate_path(path)
 
 
-def _start_sources(today):
-    """Vygeneruje umela data a spusti lokalni server, ktery se tvari jako statni zdroje."""
+def main(open_browser=True):
+    today = date.today()
+    print("DEMO: generuji umela data (vymyslene firmy a zadavatele)...")
     build_files(today)
     handler = partial(_Handler, directory=DEMO_DIR)
     srv = socketserver.TCPServer(("127.0.0.1", 0), handler)
     port = srv.server_address[1]
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     write_index(port, today)
-    zdroje = {
+
+    cfg = load_config()
+    cfg["obor"] = "it"
+    cfg["mesice"] = 12
+    cfg["nase_ico"] = NASE[0]
+    cfg["hlidac_token"] = ""
+    cfg["zdroje"] = {
         "rvz_base": f"http://127.0.0.1:{port}/rvz/",
         "smlouvy_base": f"http://127.0.0.1:{port}/smlouvy/",
         "ares_base": f"http://127.0.0.1:{port}/ares/",
         "hlidac_base": f"http://127.0.0.1:{port}/hlidac/",
         "zpravy_base": f"http://127.0.0.1:{port}/rss",
     }
+    # demo pouziva vlastni databazi a cache, aby se nemichalo se skutecnymi daty
     import ts.util as u
+    import ts.analyst as an
+    an.CSV_PREFIX = "DEMO_"
     import ts.sources.rvz as r
     import ts.sources.smlouvy as s
     cache = os.path.join(DATA_DIR, "demo_cache")
     shutil.rmtree(cache, ignore_errors=True)
     os.makedirs(cache)
-    old = u.CACHE_DIR
     u.CACHE_DIR = r.CACHE_DIR = s.CACHE_DIR = cache
-    return srv, zdroje, old
-
-
-def _restore_cache(old):
-    import ts.util as u
-    import ts.sources.rvz as r
-    import ts.sources.smlouvy as s
-    u.CACHE_DIR = r.CACHE_DIR = s.CACHE_DIR = old
-
-
-def build_demo_db(db_path):
-    """Pro webovou aplikaci: postavi demo databazi (vsechny obory) pres stejne agenty jako ostry beh."""
-    from ts import api, scout, verifier
-    from ts.db import connect
-    today = date.today()
-    srv, zdroje, old = _start_sources(today)
-    try:
-        if os.path.exists(db_path):
-            os.remove(db_path)
-        cfg = load_config()
-        cfg.update({"obor": "vse", "mesice": 12, "smlouvy_mesice": 1, "nase_ico": "", "hlidac_token": "",
-                    "ares_max_firem": 100, "zdroje": zdroje})
-        con = connect(db_path)
-        scout.scout_rvz(con, cfg, today)
-        scout.scout_smlouvy(con, cfg)
-        scout.scout_ares(con, cfg)
-        verifier.run(con)
-        api.rebuild_index(con)
-        con.close()
-    finally:
-        srv.shutdown()
-        _restore_cache(old)
-
-
-def main(open_browser=True):
-    """Prikazova radka: demo briefu (puvodni CLI)."""
-    today = date.today()
-    print("DEMO: generuji umela data (vymyslene firmy a zadavatele)...")
-    srv, zdroje, old = _start_sources(today)
-    cfg = load_config()
-    cfg.update({"obor": "it", "mesice": 12, "nase_ico": NASE[0], "hlidac_token": "", "zdroje": zdroje})
-    import ts.analyst as an
-    an.CSV_PREFIX = "DEMO_"
-    db = os.path.join(DATA_DIR, "demo_brief.db")
+    db = os.path.join(DATA_DIR, "demo.db")
     if os.path.exists(db):
         os.remove(db)
-    try:
-        res = orchestrator.run(cfg, auto_approve=True, today=today, db_path=db, typ="DEMO", suffix="_DEMO")
-    finally:
-        srv.shutdown()
-        _restore_cache(old)
+    res = orchestrator.run(cfg, auto_approve=True, today=today, db_path=db, typ="DEMO", suffix="_DEMO")
+    srv.shutdown()
     if res:
         print(f"\nHotovo. Brief: {res['brief_html']}")
         if open_browser:

@@ -183,15 +183,18 @@ def text_zakazky(z):
 def _web(url):
     if not url:
         return None
-    if not url.startswith("http"):
-        url = "https://" + url
+    from . import bezpecnost
+    from .util import session
     try:
-        r = http_get(url, timeout=10, retries=1)
-        html = r.text if r.status_code == 200 else ""
+        # jen verejne adresy, kazde presmerovani se kontroluje, max. 1 MB (ochrana proti SSRF)
+        status, html, url = bezpecnost.stahni_web(url, session())
+        html = html if status == 200 else ""
+    except bezpecnost.ChybaVstupu as e:
+        return {"url": url, "chyba": str(e)}
     except Exception as e:
-        return {"url": url, "chyba": str(e)[:120]}
+        return {"url": url, "chyba": type(e).__name__}
     if not html:
-        return {"url": url, "chyba": f"HTTP {r.status_code}"}
+        return {"url": url, "chyba": f"HTTP {status}"}
     title = re.search(r"<title[^>]*>(.*?)</title>", html, re.S | re.I)
     desc = re.search(r'<meta[^>]+name=["\']description["\'][^>]+content=["\']([^"\']+)', html, re.I)
     body = re.sub(r"(?is)<(script|style|noscript|svg|nav|footer)[^>]*>.*?</\1>", " ", html)
@@ -611,14 +614,21 @@ CPV8 = re.compile(r"^\d{8}$")
 
 
 def _ocisti_faze1(d, zaloha):
-    qs = [q for q in (d.get("questions") or []) if q.get("question_text")]
+    qs = [q for q in (d.get("questions") or []) if isinstance(q, dict) and isinstance(q.get("question_text"), str)]
     if len(qs) < 4:
         qs += zaloha["questions"][len(qs):]
     ids = ["q1_scope", "q2_budget", "q3_region", "q4_qualification"]
     for i, q in enumerate(qs[:4]):
         q["id"] = ids[i]
-        q["quick_replies"] = [str(x) for x in (q.get("quick_replies") or [])][:5] or zaloha["questions"][i]["quick_replies"]
+        qr = q.get("quick_replies") if isinstance(q.get("quick_replies"), list) else []
+        q["quick_replies"] = [str(x)[:200] for x in qr][:5] or zaloha["questions"][i]["quick_replies"]
+        q["question_text"] = q["question_text"][:600]
+        q["allow_multiple"] = bool(q.get("allow_multiple", True))
+        q["category"] = str(q.get("category") or zaloha["questions"][i].get("category") or "")[:60]
     d["questions"] = qs[:4]
+    if not isinstance(d.get("detected_summary"), str) or not d["detected_summary"].strip():
+        d["detected_summary"] = zaloha["detected_summary"]
+    d["detected_summary"] = d["detected_summary"][:2000]
     if d.get("detected_vertical") not in llm.VERTIKALY:
         d["detected_vertical"] = zaloha["detected_vertical"]
     d["status"] = "needs_clarification"
@@ -646,29 +656,48 @@ def _ocisti_profil(p, zaloha, rc):
 
 
 # ------------------------------------------------------------------ verejne API
-def _ulozit(con, ico, **kw):
-    con.execute("CREATE TABLE IF NOT EXISTS onboarding (ico TEXT PRIMARY KEY, recon TEXT, faze1 TEXT, odpovedi TEXT, profil TEXT, upraveno TEXT)")
-    row = con.execute("SELECT * FROM onboarding WHERE ico=?", (ico,)).fetchone()
-    cur = dict(row) if row else {"ico": ico, "recon": None, "faze1": None, "odpovedi": None, "profil": None}
+# Vlastnictvi (pravidlo 2): kazdy zaznam patri vlastnikovi. "" = spravce / lokalni aplikace,
+# "u:<hash>" = anonymni navstevnik online verze. Kazdy dotaz filtruje podle vlastnika,
+# cizi zaznam se tvari jako neexistujici.
+_SCHEMA = ("CREATE TABLE IF NOT EXISTS onboarding_v2 (ico TEXT, vlastnik TEXT NOT NULL DEFAULT '', recon TEXT, faze1 TEXT, "
+           "odpovedi TEXT, profil TEXT, upraveno TEXT, PRIMARY KEY (ico, vlastnik))")
+
+
+def _tabulka(con):
+    con.execute(_SCHEMA)
+    stara = con.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='onboarding'").fetchone()
+    if stara:  # prevod z verze bez vlastnika: stare profily patri spravci
+        con.execute("INSERT OR IGNORE INTO onboarding_v2 (ico,vlastnik,recon,faze1,odpovedi,profil,upraveno) "
+                    "SELECT ico,'',recon,faze1,odpovedi,profil,upraveno FROM onboarding")
+        con.execute("DROP TABLE onboarding")
+        con.commit()
+
+
+def _ulozit(con, ico, vlastnik="", **kw):
+    _tabulka(con)
+    row = con.execute("SELECT * FROM onboarding_v2 WHERE ico=? AND vlastnik=?", (ico, vlastnik)).fetchone()
+    cur = dict(row) if row else {"ico": ico, "vlastnik": vlastnik, "recon": None, "faze1": None, "odpovedi": None, "profil": None}
     for k, v in kw.items():
         cur[k] = json.dumps(v, ensure_ascii=False, default=str)
     cur["upraveno"] = datetime.now().isoformat(timespec="seconds")
-    con.execute("INSERT OR REPLACE INTO onboarding (ico,recon,faze1,odpovedi,profil,upraveno) VALUES (:ico,:recon,:faze1,:odpovedi,:profil,:upraveno)", cur)
+    con.execute("INSERT OR REPLACE INTO onboarding_v2 (ico,vlastnik,recon,faze1,odpovedi,profil,upraveno) "
+                "VALUES (:ico,:vlastnik,:recon,:faze1,:odpovedi,:profil,:upraveno)", cur)
     con.commit()
 
 
-def nacti(con, ico):
-    con.execute("CREATE TABLE IF NOT EXISTS onboarding (ico TEXT PRIMARY KEY, recon TEXT, faze1 TEXT, odpovedi TEXT, profil TEXT, upraveno TEXT)")
-    row = con.execute("SELECT * FROM onboarding WHERE ico=?", (clean_ico(ico) or ico,)).fetchone()
+def nacti(con, ico, vlastnik=""):
+    _tabulka(con)
+    row = con.execute("SELECT * FROM onboarding_v2 WHERE ico=? AND vlastnik=?", (clean_ico(ico) or ico, vlastnik)).fetchone()
     if not row:
         return None
-    return {k: (json.loads(row[k]) if row[k] and k not in ("ico", "upraveno") else row[k]) for k in row.keys()}
+    return {k: (json.loads(row[k]) if row[k] and k not in ("ico", "upraveno") else row[k])
+            for k in row.keys() if k != "vlastnik"}
 
 
-def seznam(con):
-    con.execute("CREATE TABLE IF NOT EXISTS onboarding (ico TEXT PRIMARY KEY, recon TEXT, faze1 TEXT, odpovedi TEXT, profil TEXT, upraveno TEXT)")
+def seznam(con, vlastnik=""):
+    _tabulka(con)
     out = []
-    for r in con.execute("SELECT ico, profil, recon, upraveno FROM onboarding ORDER BY upraveno DESC"):
+    for r in con.execute("SELECT ico, profil, recon, upraveno FROM onboarding_v2 WHERE vlastnik=? ORDER BY upraveno DESC", (vlastnik,)):
         p = json.loads(r["profil"]) if r["profil"] else None
         rc = json.loads(r["recon"]) if r["recon"] else {}
         out.append({"ico": r["ico"], "nazev": (p or {}).get("nazev") or rc.get("nazev"), "hotovo": bool(p),
@@ -684,53 +713,56 @@ def _recon_pro_llm(rc):
     return d
 
 
-def start(con, cfg, ico, web_url=None, online=True):
+def _ai(cfg, payload, schema, ocisti, llm_povolit, faze):
+    """Zavola vybraneho AI poskytovatele. Vraci (vycisteny vysledek nebo None, info pro frontend).
+    Cokoli se pokazi (klic, sit, limit, nesmyslna odpoved), vraci None a onboarding pouzije pravidla."""
+    n = llm.nastaveni(cfg)
+    if not n:
+        return None, {"rezim": "pravidla", "duvod": "AI není nastavená (Data → Umělá inteligence)"}
+    if llm_povolit and not llm_povolit():
+        return None, {"rezim": "pravidla", "duvod": "denní limit volání AI vyčerpán"}
+    try:
+        d, meta = llm.zavolej(n, payload, schema)
+        return ocisti(d), {"rezim": "llm", **meta}
+    except Exception as e:
+        duvod = f"{n['nazev']}: {llm.chyba_text(e)}"
+        log(A, f"Faze {faze} pres AI selhala ({duvod}), pouzivam pravidla")
+        return None, {"rezim": "pravidla", "duvod": duvod}
+
+
+def start(con, cfg, ico, web_url=None, online=True, vlastnik="", llm_povolit=None):
     """Recon + Faze 1. Vraci JSON pro frontend."""
     rc = recon(con, cfg, ico, web_url, online)
     zaloha = faze1_pravidla(rc)
-    f1, info = zaloha, {"rezim": "pravidla", "duvod": "bez Claude API klíče"}
-    key = cfg.get("anthropic_api_key")
-    if key:
-        if not llm.dostupne():
-            info["duvod"] = "chybí balíček anthropic (spusťte znovu TenderScope.bat)"
-        else:
-            try:
-                d, meta = llm.zavolej(key, cfg.get("anthropic_model"), {"faze": 1, "recon": _recon_pro_llm(rc)}, llm.SCHEMA_FAZE1)
-                f1, info = _ocisti_faze1(d, zaloha), {"rezim": "claude", **meta}
-            except Exception as e:
-                info = {"rezim": "pravidla", "duvod": f"Claude API: {llm.chyba_text(e)}"}
-                log(A, f"Faze 1 pres LLM selhala ({info['duvod']}), pouzivam pravidla")
-    _ulozit(con, rc["ico"], recon=rc, faze1=f1)
+    f1, info = _ai(cfg, {"faze": 1, "recon": _recon_pro_llm(rc)}, llm.SCHEMA_FAZE1,
+                   lambda d: _ocisti_faze1(d, zaloha), llm_povolit, 1)
+    f1 = f1 or zaloha
+    _ulozit(con, rc["ico"], vlastnik, recon=rc, faze1=f1, odpovedi=None, profil=None)
     return {"recon": rc, "faze1": f1, "agent": info}
 
 
-def dokonci(con, cfg, ico, odpovedi, today=None):
+def dokonci(con, cfg, ico, odpovedi, today=None, vlastnik="", llm_povolit=None):
     """Faze 2 + backtest. odpovedi = {qid: {"vybrano": [...], "text": "..."}}"""
-    st = nacti(con, ico)
+    st = nacti(con, ico, vlastnik)
     if not st or not st.get("recon"):
         raise ValueError("Nejdřív spusťte první krok onboardingu.")
     rc, f1 = st["recon"], st["faze1"]
     zaloha = faze2_pravidla(rc, f1, odpovedi)
-    prof, info = None, {"rezim": "pravidla", "duvod": "bez Claude API klíče"}
-    key = cfg.get("anthropic_api_key")
-    if key and llm.dostupne():
-        try:
-            d, meta = llm.zavolej(key, cfg.get("anthropic_model"),
-                                  {"faze": 2, "recon": _recon_pro_llm(rc), "otazky": f1, "odpovedi": odpovedi}, llm.SCHEMA_FAZE2)
-            prof, info = d.get("company_profile"), {"rezim": "claude", **meta}
-        except Exception as e:
-            info = {"rezim": "pravidla", "duvod": f"Claude API: {llm.chyba_text(e)}"}
-            log(A, f"Faze 2 pres LLM selhala ({info['duvod']}), pouzivam pravidla")
-    profil = _ocisti_profil(prof, zaloha, rc)
-    _ulozit(con, rc["ico"], odpovedi=odpovedi, profil=profil)
+    profil, info = _ai(cfg, {"faze": 2, "recon": _recon_pro_llm(rc), "otazky": f1, "odpovedi": odpovedi}, llm.SCHEMA_FAZE2,
+                       lambda d: _ocisti_profil(d.get("company_profile") if isinstance(d.get("company_profile"), dict) else None,
+                                                zaloha, rc), llm_povolit, 2)
+    profil = profil or _ocisti_profil(None, zaloha, rc)
+    _ulozit(con, rc["ico"], vlastnik, odpovedi=odpovedi, profil=profil)
     return {"status": "completed", "company_profile": profil, "agent": info, "zpravodaj": zpravodaj(con, profil, today)}
 
 
-def uloz_profil(con, ico, profil, today=None):
-    st = nacti(con, ico) or {}
+def uloz_profil(con, ico, profil, today=None, vlastnik=""):
+    st = nacti(con, ico, vlastnik)
+    if not st:
+        raise ValueError("Profil nenalezen. Nejdřív projděte onboarding.")
     rc = st.get("recon") or {"ico": ico, "nazev": profil.get("nazev"), "sidlo": profil.get("sidlo") or {}}
     profil = _ocisti_profil(profil, {"company_profile": profil}, rc)
-    _ulozit(con, clean_ico(ico) or ico, profil=profil)
+    _ulozit(con, clean_ico(ico) or ico, vlastnik, profil=profil)
     return {"company_profile": profil, "zpravodaj": zpravodaj(con, profil, today)}
 
 
@@ -931,8 +963,8 @@ def zpravodaj(con, profil, today=None, dni=14, limit=30):
             "doporuceno": sum(1 for p in polozky if p["verdikt"] == "doporučeno"), "polozky": polozky[:limit]}
 
 
-def vhodnost_jedne(con, ico, zakazka_id, today=None):
-    st = nacti(con, ico)
+def vhodnost_jedne(con, ico, zakazka_id, today=None, vlastnik=""):
+    st = nacti(con, ico, vlastnik)
     if not st or not st.get("profil"):
         raise ValueError("Firma nemá dokončený onboarding.")
     profil = st["profil"]

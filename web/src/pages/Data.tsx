@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { api, type Beh, type Nastaveni, type Stav } from "../api";
+import { adminHeslo, api, nastavAdminHeslo, type AiForm, type Beh, type Nastaveni, type Stav } from "../api";
 import { Card, Kpi } from "../components";
 import { datum, num } from "../format";
 
@@ -35,16 +35,27 @@ export default function Data({ stav, refresh }: { stav: Stav | null; refresh: ()
   const [nast, setNast] = useState<Nastaveni | null>(null);
   const [vault, setVault] = useState("");
   const [exaKey, setExaKey] = useState("");
-  const [claudeKey, setClaudeKey] = useState("");
   const [ulozeno, setUlozeno] = useState(false);
-  useEffect(() => {
-    api.nastaveni().then((n) => { setNast(n); setVault(n.obsidian_vault); }).catch(() => undefined);
-  }, []);
+  const [chybaUlozeni, setChybaUlozeni] = useState<string | null>(null);
+  const [heslo, setHeslo] = useState(adminHeslo());
+  const [chybaAkt, setChybaAkt] = useState<string | null>(null);
+  const nactiNast = () => api.nastaveni().then((n) => { setNast(n); setVault(n.obsidian_vault); }).catch(() => undefined);
+  useEffect(() => { nactiNast(); }, []);
+  const prihlasit = async () => {
+    nastavAdminHeslo(heslo.trim());
+    await nactiNast();
+  };
   const ulozit = async () => {
-    const n = await api.ulozNastaveni({ obsidian_vault: vault, ...(exaKey ? { exa_api_key: exaKey } : {}), ...(claudeKey ? { anthropic_api_key: claudeKey } : {}) });
+    setChybaUlozeni(null);
+    let n: Nastaveni;
+    try {
+      n = await api.ulozNastaveni({ obsidian_vault: vault, ...(exaKey ? { exa_api_key: exaKey } : {}) });
+    } catch (e) {
+      setChybaUlozeni(String(e instanceof Error ? e.message : e));
+      return;
+    }
     setNast(n);
     setExaKey("");
-    setClaudeKey("");
     setUlozeno(true);
     setTimeout(() => setUlozeno(false), 2000);
   };
@@ -73,7 +84,12 @@ export default function Data({ stav, refresh }: { stav: Stav | null; refresh: ()
   }, [beh?.log.length]);
 
   const start = async (rezim: "rychle" | "plny") => {
-    await api.aktualizovat(rezim);
+    setChybaAkt(null);
+    try {
+      await api.aktualizovat(rezim);
+    } catch (e) {
+      setChybaAkt(String(e instanceof Error ? e.message : e));
+    }
     setBeh(await api.beh());
   };
 
@@ -89,6 +105,16 @@ export default function Data({ stav, refresh }: { stav: Stav | null; refresh: ()
         </div>
       )}
 
+      {nast?.verejne && (
+        <Card title="Online verze" sub="Tahle kopie běží veřejně na internetu. Prohlížet, hledat firmy a dělat onboarding může kdokoli. Aktualizaci dat, klíče a diagnostiku spustí jen správce s heslem.">
+          <div className="row">
+            <input className="field" style={{ width: 220, marginTop: 0 }} type="password" value={heslo} onChange={(e) => setHeslo(e.target.value)} placeholder="admin heslo" aria-label="Admin heslo" />
+            <button className="btn primary" onClick={prihlasit}>Přihlásit</button>
+            {nast.admin ? <span className="badge good">✓ správce</span> : adminHeslo() ? <span className="badge bad">špatné heslo</span> : <span className="secondary small">jen prohlížení</span>}
+          </div>
+        </Card>
+      )}
+
       <Card title="Aktualizace dat" sub="Agenti stáhnou otevřená data státu, vytáhnou z nich zakázky, zkontrolují je a přepočítají index firem.">
         {stav?.demo && <div className="callout" style={{ marginBottom: 12 }}>Běžíte v DEMO režimu: aktualizace jen znovu vygeneruje umělá data. Pro reálná data spusťte aplikaci volbou „Aplikace – reálná data“.</div>}
         <div className="row">
@@ -99,6 +125,7 @@ export default function Data({ stav, refresh }: { stav: Stav | null; refresh: ()
           <button className="btn" disabled={beh?.bezi} onClick={() => start("plny")}>Plná aktualizace</button>
           <span className="secondary small">12 měsíců + Registr smluv (ověření vítězů) · první běh desítky minut, další jen přírůstky</span>
         </div>
+        {chybaAkt && <div className="callout" style={{ marginTop: 12 }}>{chybaAkt}</div>}
         {beh && (beh.bezi || beh.log.length > 0) && (
           <div style={{ marginTop: 16 }}>
             <div className="row" style={{ marginBottom: 8 }}>
@@ -109,14 +136,9 @@ export default function Data({ stav, refresh }: { stav: Stav | null; refresh: ()
         )}
       </Card>
 
-      <Card title="Klíče a Obsidian" sub="Claude API pohání Onboarding agenta (otázky a profil firmy). Exa a Obsidian slouží pro knowledge graph. Vše je nepovinné.">
-        <label className="small secondary" htmlFor="claude">
-          Claude API klíč (nepovinné – bez něj onboarding použije pravidla; klíč na console.anthropic.com) {nast?.anthropic_api_key_nastaven && <span className="badge good">✓ nastaven {nast.anthropic_api_key_nahled}</span>}
-          {nast && !nast.anthropic_sdk && <span className="badge warn">chybí knihovna anthropic – spusťte znovu TenderScope.bat</span>}
-        </label>
-        <input id="claude" className="field" type="password" value={claudeKey} onChange={(e) => setClaudeKey(e.target.value)} placeholder={nast?.anthropic_api_key_nastaven ? "ponechat stávající" : "sk-ant-…"} />
-        {nast?.anthropic_api_key_nastaven && <div className="small muted" style={{ marginTop: 4 }}>Model: {nast.anthropic_model}</div>}
-        <div style={{ height: 10 }} />
+      {nast && <AiCard key={`${nast.admin}-${nast.ai.poskytovatel}`} nast={nast} onSaved={setNast} />}
+
+      <Card title="Obsidian a Exa" sub="Pro export do Obsidianu (knowledge graph). Vše je nepovinné.">
         <label className="small secondary" htmlFor="vault">Cesta ke složce Obsidian trezoru (vytvoří se v ní podsložka TenderScope)</label>
         <input id="vault" className="field" value={vault} onChange={(e) => setVault(e.target.value)} placeholder="např. C:\Users\Jan\OneDrive\9.semestr\CI\Obsidian\Jan" />
         <label className="small secondary" htmlFor="exa" style={{ marginTop: 10, display: "block" }}>
@@ -126,6 +148,7 @@ export default function Data({ stav, refresh }: { stav: Stav | null; refresh: ()
         <div className="row" style={{ marginTop: 12 }}>
           <button className="btn primary" onClick={ulozit}>Uložit</button>
           {ulozeno && <span className="badge good">✓ uloženo</span>}
+          {chybaUlozeni && <span className="badge bad">{chybaUlozeni}</span>}
         </div>
       </Card>
 
@@ -152,5 +175,122 @@ export default function Data({ stav, refresh }: { stav: Stav | null; refresh: ()
         </div>
       </Card>
     </div>
+  );
+}
+
+
+// ------------------------------------------------------------------ vyber AI poskytovatele
+function AiCard({ nast, onSaved }: { nast: Nastaveni; onSaved: (n: Nastaveni) => void }) {
+  const ai = nast.ai;
+  const [prov, setProv] = useState(ai.poskytovatel);
+  const p = ai.poskytovatele.find((x) => x.id === prov) ?? ai.poskytovatele[0];
+  const [klic, setKlic] = useState("");
+  const [model, setModel] = useState(p.model);
+  const [url, setUrl] = useState(p.url);
+  const [ucet, setUcet] = useState(p.ucet);
+  const [modely, setModely] = useState<string[]>([]);
+  const [zprava, setZprava] = useState<{ ok: boolean; text: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const zamceno = !!nast.verejne && !nast.admin;
+
+  const zmenProv = (id: string) => {
+    const q = ai.poskytovatele.find((x) => x.id === id)!;
+    setProv(id); setKlic(""); setModel(q.model); setUrl(q.url); setUcet(q.ucet); setModely([]); setZprava(null);
+  };
+  const form = (): AiForm => ({
+    llm_poskytovatel: prov, ...(klic ? { llm_klic: klic } : {}), ...(model ? { llm_model: model } : {}),
+    ...(p.vlastni_url ? { llm_url: url } : {}), ...(p.potrebuje_ucet && ucet ? { llm_ucet: ucet } : {}),
+  });
+  const akce = async (fn: () => Promise<void>) => {
+    setBusy(true); setZprava(null);
+    try { await fn(); } catch (e) { setZprava({ ok: false, text: String(e instanceof Error ? e.message : e) }); }
+    setBusy(false);
+  };
+  const nacistModely = () => akce(async () => {
+    const r = await api.aiModely(form());
+    if (r.ok && r.modely) { setModely(r.modely); setZprava({ ok: true, text: `Načteno ${r.modely.length} modelů – vyberte v poli Model.` }); }
+    else setZprava({ ok: false, text: r.chyba || "Modely se nepodařilo načíst." });
+  });
+  const vyzkouset = () => akce(async () => {
+    const r = await api.aiTest(form());
+    setZprava(r.ok ? { ok: true, text: `Funguje ✓ ${r.poskytovatel} (${r.model}) odpověděl: „${r.odpoved}“` } : { ok: false, text: r.chyba || "Nefunguje." });
+  });
+  const ulozit = () => akce(async () => {
+    const n = await api.ulozNastaveni(form());
+    onSaved(n); setKlic("");
+    setZprava({ ok: true, text: "Uloženo. Onboarding teď používá " + (n.ai.pripraveno ? `${p.nazev} (${n.ai.model}).` : "pravidla – chybí klíč.") });
+  });
+
+  return (
+    <Card title="Umělá inteligence (onboarding agent)"
+      sub="Vyberte, která AI píše otázky a profil firmy. Klíč zůstává jen u vás (na GitHub se nenahrává). Bez AI onboarding funguje na pravidla.">
+      <div className="row" style={{ marginBottom: 8 }}>
+        {ai.pripraveno ? <span className="badge good">Aktivní: {ai.poskytovatele.find((x) => x.id === ai.poskytovatel)?.nazev} · {ai.model}</span>
+          : <span className="badge neutral">AI není nastavená – používají se pravidla</span>}
+        {nast.limity && <span className="secondary small">dnes {nast.limity.ai_dnes} / {nast.limity.ai_max} volání AI</span>}
+      </div>
+      {zamceno && <div className="callout" style={{ marginBottom: 10 }}>Na online verzi mění AI jen správce (přihlášení výše). Návštěvníci mají onboarding na pravidla, nic se neplatí.</div>}
+      <label className="small secondary" htmlFor="ai-prov">Poskytovatel</label>
+      <select id="ai-prov" className="field" value={prov} onChange={(e) => zmenProv(e.target.value)} disabled={zamceno}>
+        {([["Placené (podle spotřeby)", (x: typeof p) => !x.zdarma && !x.vlastni_url],
+           ["Zdarma (bezplatné tarify)", (x: typeof p) => x.zdarma && !x.vlastni_url],
+           ["Na vašem počítači / vlastní", (x: typeof p) => x.vlastni_url]] as const).map(([nazev, f]) => (
+          <optgroup key={nazev} label={nazev}>
+            {ai.poskytovatele.filter(f).map((x) => (
+              <option key={x.id} value={x.id}>{x.nazev}{!x.potrebuje_klic && x.zdarma ? " · bez klíče" : ""}{x.klic_nastaven ? " ✓" : ""}</option>
+            ))}
+          </optgroup>
+        ))}
+      </select>
+      {(p.limit || p.pozn || p.zdarma) && (
+        <div className="callout small" style={{ marginTop: 8 }}>
+          {p.limit && <div><b>Limit:</b> {p.limit}</div>}
+          <div><b>Klíč:</b> {p.potrebuje_klic ? "nutný" : p.ma_klic_pole ? "není nutný (s klíčem vyšší limity)" : "nepotřebuje"}{p.potrebuje_ucet ? " + Account ID" : ""}</div>
+          {p.pozn && <div style={{ marginTop: 4 }}>{p.pozn}</div>}
+          {p.zdarma && !p.soukromi_ok && (
+            <div style={{ marginTop: 6 }}>
+              ⚠️ <b>Soukromí:</b> bezplatné tarify mohou dotazy ukládat nebo je použít ke zlepšování modelů. Onboarding posílá
+              údaje o firmě a vaše odpovědi z dotazníku – nepište tam nic důvěrného. Pro citlivá data použijte placený tarif nebo Ollamu.
+            </div>
+          )}
+        </div>
+      )}
+      {p.ma_klic_pole && (
+        <>
+          <label className="small secondary" htmlFor="ai-klic" style={{ marginTop: 10, display: "block" }}>
+            API klíč {p.potrebuje_klic ? "" : "(nepovinné)"} {p.web && <a href={p.web} target="_blank" rel="noopener noreferrer">kde ho získat</a>}
+            {p.klic_nastaven && <span className="badge good" style={{ marginLeft: 6 }}>✓ uložen {p.klic_nahled}</span>}
+          </label>
+          <input id="ai-klic" className="field" type="password" autoComplete="off" value={klic} onChange={(e) => setKlic(e.target.value)}
+            placeholder={p.klic_nastaven ? "ponechat stávající" : "vložte klíč"} disabled={zamceno} />
+        </>
+      )}
+      {prov === "anthropic" && !ai.anthropic_sdk && <div className="badge warn" style={{ marginTop: 6 }}>chybí knihovna anthropic – spusťte znovu TenderScope.bat</div>}
+      {prov === "ollama" && <div className="small muted" style={{ marginTop: 6 }}>Ollama běží zdarma na vašem počítači: nainstalujte ji z ollama.com a stáhněte model (např. příkazem <code>ollama pull llama3.1</code>). Na online verzi nefunguje.</div>}
+      {p.potrebuje_ucet && (
+        <>
+          <label className="small secondary" htmlFor="ai-ucet" style={{ marginTop: 10, display: "block" }}>Account ID (32 znaků, v přehledu účtu Cloudflare vpravo)</label>
+          <input id="ai-ucet" className="field" value={ucet} onChange={(e) => setUcet(e.target.value.trim())} placeholder="např. 0123456789abcdef0123456789abcdef" disabled={zamceno} />
+        </>
+      )}
+      {p.vlastni_url && (
+        <>
+          <label className="small secondary" htmlFor="ai-url" style={{ marginTop: 10, display: "block" }}>Adresa API (OpenAI-kompatibilní, končí obvykle /v1)</label>
+          <input id="ai-url" className="field" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://…/v1" disabled={zamceno} />
+        </>
+      )}
+      <label className="small secondary" htmlFor="ai-model" style={{ marginTop: 10, display: "block" }}>
+        Model {p.model_vychozi && <span className="muted">(návrh: {p.model_vychozi} – názvy se mění, tlačítkem „Načíst modely“ zjistíte aktuální)</span>}
+      </label>
+      <input id="ai-model" className="field" list="ai-modely" value={model} onChange={(e) => setModel(e.target.value)} placeholder="název modelu" disabled={zamceno} />
+      <datalist id="ai-modely">{modely.map((m) => <option key={m} value={m} />)}</datalist>
+      <div className="row" style={{ marginTop: 12 }}>
+        <button className="btn primary" onClick={ulozit} disabled={busy || zamceno}>Uložit a používat</button>
+        <button className="btn" onClick={nacistModely} disabled={busy || zamceno}>Načíst modely</button>
+        <button className="btn" onClick={vyzkouset} disabled={busy || zamceno} title="Pošle krátký zkušební dotaz (pár haléřů)">Vyzkoušet</button>
+        {busy && <span className="spinner" />}
+      </div>
+      {zprava && <div className={`badge ${zprava.ok ? "good" : "bad"}`} style={{ marginTop: 10, whiteSpace: "normal" }}>{zprava.text}</div>}
+    </Card>
   );
 }
