@@ -195,17 +195,27 @@ def scout_smlouvy(con, cfg):
     if souhrn_n <= 0:
         log(A, "Registr smluv: vypnuto (smlouvy_mesice = 0) -> preskakuji")
         return {"preskoceno": True}
-    dumps = smlouvy.fetch_index(base)
-    dumps.sort(key=lambda d: (d["rok"], d["mesic"]))
-    dumps = dumps[-souhrn_n:]
-    total = smluv = 0
-    for i, d in enumerate(dumps):
-        dump_id = f"{d['rok']}_{d['mesic']:02d}"
-        detail = i >= len(dumps) - detail_n
-        klic = f"rs2:{dump_id}"
+    if con.execute("SELECT 1 FROM soubory WHERE klic LIKE 'rs2:%' LIMIT 1").fetchone():
+        # verze 10/11 brala z indexu i denni prirustky jako mesice -> souhrn prepocitat znovu
+        con.execute("DELETE FROM smlouvy_souhrn")
+        con.execute("DELETE FROM smlouvy_odberatele")
+        con.execute("DELETE FROM soubory WHERE klic LIKE 'rs2:%'")
+        con.commit()
+    vybrane = smlouvy.vyber_dumpy(smlouvy.fetch_index(base), souhrn_n)
+    mesice_detail = sorted({did[:7] for did, _ in vybrane})[-detail_n:] if detail_n else []
+    log(A, f"Registr smluv: {len({did[:7] for did, _ in vybrane})} mesicu ({len(vybrane)} souboru), detail za {len(mesice_detail)}")
+    total = smluv = novych = 0
+    max_novych = int(cfg.get("smlouvy_max_novych") or 0)  # GitHub Actions: historii doplnovat po castech
+    for dump_id, d in reversed(vybrane):  # od nejnovejsiho: aktualni data maji prednost, historie se doplni
+        detail = dump_id[:7] in mesice_detail
+        klic = f"rs3:{dump_id}"
         row = con.execute("SELECT podpis FROM soubory WHERE klic=?", (klic,)).fetchone()
-        if d["dokonceny"] and row and (row[0].startswith("d:") or not detail):
+        if (d["dokonceny"] or d["den"]) and row and (row[0].startswith("d:") or not detail):
             continue  # hotovy mesic uz je zpracovany -> nestahovat znovu
+        if max_novych and novych >= max_novych:
+            log(A, f"Registr smluv: dalsi starsi mesice doplni pristi beh (limit {max_novych} na beh)")
+            break
+        novych += 1
         try:
             path = smlouvy.fetch_dump(d)
         except Exception as e:
@@ -259,6 +269,11 @@ def scout_smlouvy(con, cfg):
         con.commit()
         con.execute("INSERT OR REPLACE INTO soubory VALUES (?,?)", (klic, podpis))
         con.commit()
+        if cfg.get("mazat_stazene"):  # GitHub Actions: male misto na disku -> zpracovany soubor smazat
+            try:
+                os.remove(path)
+            except OSError:
+                pass
         total += rel
         smluv += n
         log(A, f"Registr smluv {d['mesic']:02d}/{d['rok']}: {n} smluv" + (f", {rel} ulozeno v detailu" if detail else " (souhrn)"))

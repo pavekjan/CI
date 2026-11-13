@@ -150,7 +150,7 @@ def obdobi(con):
     """Za jake obdobi data jsou: RVZ = zpracovane mesicni soubory, Registr smluv = zpracovane mesice registru."""
     rvz = sorted(f"{k[-4:]}-{k[-7:-5]}" for (k,) in con.execute(
         "SELECT DISTINCT substr(klic, 5, instr(substr(klic, 5), '.zip') - 1) FROM soubory WHERE klic LIKE 'rvz:rvz_VZ-%'"))
-    rs = sorted(k[4:8] + "-" + k[9:11] for (k,) in con.execute("SELECT klic FROM soubory WHERE klic LIKE 'rs2:%'"))
+    rs = sorted({k[4:8] + "-" + k[9:11] for (k,) in con.execute("SELECT klic FROM soubory WHERE klic LIKE 'rs3:%'")})
     return {"rvz_od": rvz[0] if rvz else None, "rvz_do": rvz[-1] if rvz else None, "rvz_mesicu": len(rvz),
             "rs_od": rs[0] if rs else None, "rs_do": rs[-1] if rs else None, "rs_mesicu": len(rs)}
 

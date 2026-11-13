@@ -39,6 +39,9 @@ def main():
     global LIMIT_MB
     if "--limit" in sys.argv:
         LIMIT_MB = max(1, min(95, int(sys.argv[sys.argv.index("--limit") + 1])))
+    global ZDROJ
+    if "--db" in sys.argv:
+        ZDROJ = os.path.abspath(sys.argv[sys.argv.index("--db") + 1])
     if not os.path.exists(ZDROJ):
         print("Nenasel jsem data/tenderscope.db. Nejdriv v aplikaci spustte aktualizaci dat.")
         return 1
@@ -56,13 +59,13 @@ def main():
     def bez_detailu_smluv():
         con.execute("DELETE FROM smlouvy_strany")
         con.execute("DELETE FROM smlouvy")
-        con.execute("UPDATE soubory SET podpis='s:' || substr(podpis, 3) WHERE klic LIKE 'rs2:%' AND podpis LIKE 'd:%'")
+        con.execute("UPDATE soubory SET podpis='s:' || substr(podpis, 3) WHERE klic LIKE 'rs3:%' AND podpis LIKE 'd:%'")
 
     def souhrn_jen(mesicu):
         con.execute("DELETE FROM smlouvy_souhrn WHERE mesic < strftime('%Y-%m', 'now', ?)", (f"-{mesicu} months",))
-        con.execute("DELETE FROM soubory WHERE klic LIKE 'rs2:%' AND substr(klic, 5, 4) || '-' || substr(klic, 10, 2) < "
+        con.execute("DELETE FROM soubory WHERE klic LIKE 'rs3:%' AND substr(klic, 5, 4) || '-' || substr(klic, 10, 2) < "
                     "strftime('%Y-%m', 'now', ?)", (f"-{mesicu} months",))
-        con.execute("DELETE FROM smlouvy_odberatele WHERE dump NOT IN (SELECT substr(klic, 5) FROM soubory WHERE klic LIKE 'rs2:%')")
+        con.execute("DELETE FROM smlouvy_odberatele WHERE dump NOT IN (SELECT substr(klic, 5) FROM soubory WHERE klic LIKE 'rs3:%')")
 
     def zakazky_jen(mesicu):
         smaz_stare(con, mesicu)

@@ -191,18 +191,21 @@ nestáhne. Data proto stahuje jiný počítač a nahrává je na GitHub do zvlá
 načte (`TS_DB_URL` v `render.yaml`). Bezplatný Render se po 15 minutách bez návštěvy uspí a při další
 návštěvě znovu nastartuje, takže nová data má prakticky hned.
 
-**Možnost A – automaticky na GitHubu (nic nemusíte mít zapnuté):**
-1. Na GitHubu otevřete záložku **Actions** → vlevo **Aktualizace dat** → **Run workflow**.
-2. Za 20–60 minut by měla svítit zelená fajfka. Pak to běží samo každé ráno.
-3. Když je červená a v logu je „server ISVZ … neodpovídá“, servery GitHubu jsou blokované také.
-   Pak použijte možnost B a v Actions u workflow zvolte **⋯ → Disable workflow**.
+Práce je rozdělená na dvě části, protože server se zakázkami (ISVZ) odpovídá jen počítačům v Česku:
 
-**Možnost B – z vašeho počítače:** dvakrát klikněte na **`aktualizovat_online.bat`**. Stáhne čerstvá data
-a nahraje je na GitHub. Aby to běželo samo každý den, v PowerShellu ve složce aplikace spusťte jednou:
+**1. Registr smluv – automaticky každé ráno na GitHubu (Actions → Aktualizace dat).** Nic nemusíte mít
+zapnuté. Historie za 3 roky se doplňuje po částech (asi 8 měsíců za jeden běh), takže je kompletní zhruba
+za týden. Zakázky z ISVZ tady skončí hláškou „neodpovídá“ a přeskočí se – to je v pořádku.
+
+**2. Zakázky (RVZ) – z vašeho počítače, stačí jednou za měsíc** (nový měsíc ISVZ zveřejní kolem
+10. dne): dvakrát klikněte na **`aktualizovat_online.bat`**. Stáhne aktuální online databázi z větve
+`data` (i se smlouvami, které do ní doplnil GitHub), přidá do ní zakázky za 12 měsíců a nahraje ji zpět.
+Nespouštějte ho mezi 5:00 a 6:30 ráno, kdy běží aktualizace na GitHubu. Automatické spouštění (každé druhé
+pondělí), v PowerShellu ve složce aplikace jednou:
 
 ```powershell
 $a = New-ScheduledTaskAction -Execute "$PWD\aktualizovat_online.bat" -Argument "/tichy" -WorkingDirectory "$PWD"
-Register-ScheduledTask -TaskName "TenderScope data" -Action $a -Trigger (New-ScheduledTaskTrigger -Daily -At 7am)
+Register-ScheduledTask -TaskName "TenderScope data" -Action $a -Trigger (New-ScheduledTaskTrigger -Weekly -WeeksInterval 2 -DaysOfWeek Monday -At 9am)
 ```
 (Počítač musí být v tu dobu zapnutý. Zrušení: `Unregister-ScheduledTask -TaskName "TenderScope data"`.)
 

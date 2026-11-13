@@ -270,6 +270,10 @@ def run_update(rezim):
             cfg["obor"] = "vse"
             if rezim == "rychle":
                 cfg.update({"mesice": 3, "smlouvy_mesice": 0, "smlouvy_souhrn_mesice": 0, "ares_max_firem": 30})
+            elif rezim == "zakazky":
+                # jen zakazky z ISVZ (12 mesicu); Registr smluv doplnuje GitHub Actions
+                cfg.update({"mesice": cfg.get("mesice", 12), "smlouvy_mesice": 0, "smlouvy_souhrn_mesice": 0,
+                            "ares_max_firem": 40})
             else:
                 # plna i denni: 12 mesicu zakazek, Registr smluv 3 mesice v detailu a 36 mesicu v souhrnu.
                 # Hotove mesice se preskakuji bez stahovani, takze dalsi behy doplni jen nove mesice.

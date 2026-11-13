@@ -30,7 +30,7 @@ class Registr(unittest.TestCase):
             with open(p, "w", encoding="utf-8") as f:
                 f.write("<dump>" + "".join(_zaznam(f"{k}-{j}", "00064165", "27082440", 1000 * (j + 1), f"{rok}-{mes:02d}-1{j}")
                                          for j in range(3)) + "</dump>")
-            self.dumpy.append({"rok": rok, "mesic": mes, "odkaz": p, "velikost": 1, "dokonceny": k < 2, "_cesta": p})
+            self.dumpy.append({"rok": rok, "mesic": mes, "odkaz": p, "velikost": 1, "dokonceny": k < 2, "den": None, "_cesta": p})
         self.stazeno = []
 
     def _beh(self):
@@ -80,6 +80,26 @@ class Registr(unittest.TestCase):
         ids = {u["id"] for u in g["uzly"]}
         self.assertTrue(all(h["od"] in ids and h["do"] in ids for h in g["hrany"]))
         self.assertTrue(all(u["odkaz"] is None or u["odkaz"].startswith(("#/", "https://")) for u in g["uzly"]))
+
+
+    def test_denni_prirustky_nejsou_mesice(self):
+        from ts.sources import smlouvy
+        d = [{"rok": 2026, "mesic": m, "den": None, "odkaz": f"dump_2026_{m:02d}.xml", "dokonceny": m < 11} for m in (8, 9, 10, 11)]
+        d += [{"rok": 2026, "mesic": 11, "den": x, "odkaz": f"dump_2026_11_{x:02d}.xml", "dokonceny": False} for x in (1, 2, 3)]
+        d += [{"rok": 2026, "mesic": 12, "den": x, "odkaz": f"dump_2026_12_{x:02d}.xml", "dokonceny": False} for x in (1, 2)]
+        v = smlouvy.vyber_dumpy(d, 3)
+        self.assertEqual([i for i, _ in v], ["2026_10", "2026_11", "2026_12_01", "2026_12_02"])
+        self.assertEqual(len(smlouvy.vyber_dumpy(d, 36)), 6)
+
+
+    def test_po_castech(self):
+        self.cfg["smlouvy_max_novych"] = 2
+        self._beh()
+        self.assertEqual(self.stazeno, [10, 9])  # nejdriv nejnovejsi
+        self.stazeno.clear()
+        self._beh()
+        self.assertEqual(self.stazeno, [10, 8])  # aktualni mesic znovu, pak chybejici historie
+        self.assertEqual(api.obdobi(self.con)["rs_mesicu"], 3)
 
 
 if __name__ == "__main__":

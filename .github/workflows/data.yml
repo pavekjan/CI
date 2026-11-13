@@ -33,7 +33,7 @@ jobs:
           HLIDAC_TOKEN: ${{ secrets.HLIDAC_TOKEN }}
           REPO: ${{ github.repository }}
         # zacina z posledni databaze ve vetvi data, takze se stahuji a zpracovavaji jen nove mesice
-        run: python aktualizovat_db.py --z-url "https://raw.githubusercontent.com/${REPO}/data/tenderscope.db.gz"
+        run: python aktualizovat_db.py --ci --z-url "https://raw.githubusercontent.com/${REPO}/data/tenderscope.db.gz"
       - name: Zabalit databazi
         run: python pripravit_db.py --limit 95
       - name: Nahrat do vetve data

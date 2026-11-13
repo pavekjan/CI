@@ -6,6 +6,7 @@ Dumpy jsou velke (stovky MB), proto se ctou streamovane (iterparse) a ukladaji s
 jen smlouvy relevantni pro obor nebo pro zname dodavatele/zadavatele.
 """
 import os
+import re
 import xml.etree.ElementTree as ET
 
 from ..util import CACHE_DIR, download, http_get, log, norm, clean_ico, to_float
@@ -36,18 +37,37 @@ def fetch_index(base):
     for d in root.iter():
         if _local(d.tag) != "dump":
             continue
+        odkaz = _text(d, "odkaz") or ""
+        m = re.search(r"dump_(\d{4})_(\d{2})(?:_(\d{2}))?", odkaz)
+        den = _text(d, "den") or (m.group(3) if m else None)
         dumps.append({
-            "rok": int(_text(d, "rok") or 0),
-            "mesic": int(_text(d, "mesic") or 0),
-            "odkaz": _text(d, "odkaz"),
+            "rok": int(_text(d, "rok") or (m.group(1) if m else 0)),
+            "mesic": int(_text(d, "mesic") or (m.group(2) if m else 0)),
+            "den": int(den) if den else None,  # index obsahuje i denni prirustky, ne jen mesicni dumpy
+            "odkaz": odkaz,
             "velikost": int(_text(d, "velikostDumpu") or 0),
             "dokonceny": _text(d, "dokoncenyMesic") == "1",
         })
     return dumps
 
 
+def vyber_dumpy(dumps, mesicu):
+    """Poslednich `mesicu` mesicu: mesicni dump, a jen kde mesicni chybi, denni prirustky toho mesice.
+    Vraci [(dump_id, dump)] serazene od nejstarsiho; dump_id je unikatni (2025_03 nebo 2026_11_12)."""
+    mesice = sorted({(d["rok"], d["mesic"]) for d in dumps if d["rok"] and d["mesic"]})[-mesicu:] if mesicu > 0 else []
+    out = []
+    for rok, mes in mesice:
+        cele = [d for d in dumps if (d["rok"], d["mesic"]) == (rok, mes) and not d["den"]]
+        if cele:
+            out.append((f"{rok}_{mes:02d}", cele[-1]))
+        else:
+            out += [(f"{rok}_{mes:02d}_{d['den']:02d}", d) for d in sorted(
+                (d for d in dumps if (d["rok"], d["mesic"]) == (rok, mes) and d["den"]), key=lambda d: d["den"])]
+    return out
+
+
 def fetch_dump(dump):
-    name = f"smlouvy_dump_{dump['rok']}_{dump['mesic']:02d}.xml"
+    name = "smlouvy_" + (os.path.basename(dump.get("odkaz") or "") or f"dump_{dump['rok']}_{dump['mesic']:02d}.xml")
     dest = os.path.join(CACHE_DIR, name)
     max_age = None if dump["dokonceny"] else 24
     mb = dump["velikost"] >> 20
