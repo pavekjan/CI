@@ -3,6 +3,8 @@ rem Stahne cerstva data na tomto pocitaci a nahraje je pro online verzi (vetev "
 rem Da se spoustet automaticky kazdy den pres Planovac uloh Windows (viz README, kapitola 5).
 cd /d "%~dp0"
 if exist .venv\Scripts\python.exe (set PY=.venv\Scripts\python.exe) else (set PY=python)
+rem doinstaluje knihovny z requirements.txt (kdyz uz jsou, trva to par sekund)
+%PY% -m pip install -q --disable-pip-version-check -r requirements.txt
 %PY% aktualizovat_db.py || goto chyba
 %PY% pripravit_db.py --limit 95 || goto chyba
 %PY% nahrat_data.py || goto chyba

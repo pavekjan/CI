@@ -31,7 +31,7 @@ jobs:
       - name: Stahnout data (zakazky, Registr smluv, ARES)
         env:
           HLIDAC_TOKEN: ${{ secrets.HLIDAC_TOKEN }}
-        run: python aktualizovat_db.py
+        run: python aktualizovat_db.py --plny
       - name: Zabalit databazi
         run: python pripravit_db.py --limit 95
       - name: Nahrat do vetve data

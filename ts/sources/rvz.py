@@ -30,7 +30,9 @@ def fetch_month(base, year, month, kategorie="VZ", current=False):
 
 
 def _backend():
-    return f"ijson/{getattr(ijson, 'backend', '?')}" if ijson is not None else "json"
+    if ijson is not None and "yajl2" in str(getattr(ijson, "backend", "")):
+        return f"ijson/{ijson.backend}"
+    return "proudove (json)"
 
 
 def _iter_json_stream(fobj):
@@ -55,7 +57,7 @@ def _iter_json_stream(fobj):
         except ValueError:
             fobj.seek(0)
 
-    if ijson is not None:
+    if ijson is not None and "yajl2" in str(getattr(ijson, "backend", "")):  # jen rychly C backend, jinak vlastni cteni
         if first == b"[":
             yield from ijson.items(fobj, "item", use_float=True)
             return
@@ -71,8 +73,75 @@ def _iter_json_stream(fobj):
             return
         fobj.seek(0)
 
-    data = json.load(io.TextIOWrapper(fobj, encoding="utf-8-sig"))
-    yield from _records_from_obj(data)
+    # bez ijson: vlastni proudove cteni (nikdy nenacitat cely soubor o velikosti GB do pameti)
+    yield from _iter_stdlib(fobj)
+
+
+def _iter_stdlib(fobj, blok=1 << 20, max_zaznam=64 << 20):
+    """Proudove cteni pole zaznamu jen se standardni knihovnou: najde prvni pole objektu ('[' a za nim '{')
+    a pak po jednom dekoduje objekty pomoci json.raw_decode. Pamet = jen par MB bez ohledu na velikost souboru."""
+    text = io.TextIOWrapper(fobj, encoding="utf-8-sig")
+    dec = json.JSONDecoder()
+    buf, konec = "", False
+
+    def docti():
+        nonlocal buf, konec
+        kus = text.read(blok)
+        if kus:
+            buf += kus
+        else:
+            konec = True
+
+    # 1) zacatek pole se zaznamy
+    while True:
+        i = 0
+        nalez = -1
+        while True:
+            j = buf.find("[", i)
+            if j < 0:
+                break
+            k = j + 1
+            while k < len(buf) and buf[k] in " \t\r\n":
+                k += 1
+            if k < len(buf) and buf[k] == "{":
+                nalez = k
+                break
+            if k >= len(buf):
+                break  # nevime, co nasleduje -> docist
+            i = j + 1
+        if nalez >= 0:
+            buf = buf[nalez:]
+            break
+        if konec:
+            return
+        if len(buf) > max_zaznam:
+            buf = buf[-16:]
+        docti()
+    # 2) objekty jeden po druhem (pozice v bufferu, ne kopirovani retezce po kazdem zaznamu)
+    pos = 0
+    bile = " \t\r\n,"
+    while True:
+        while pos < len(buf) and buf[pos] in bile:
+            pos += 1
+        if pos >= len(buf):
+            if konec:
+                return
+            buf, pos = buf[pos:], 0
+            docti()
+            continue
+        if buf[pos] != "{":
+            return  # konec pole
+        try:
+            obj, end = dec.raw_decode(buf, pos)
+        except json.JSONDecodeError:
+            if konec or len(buf) - pos > max_zaznam:
+                raise
+            buf, pos = buf[pos:], 0
+            docti()
+            continue
+        if isinstance(obj, dict):
+            yield obj
+        pos = end
 
 
 def _records_from_obj(data):

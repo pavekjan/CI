@@ -33,5 +33,26 @@ class Nedostupne(unittest.TestCase):
         self.assertTrue(scout.je_nedostupny(RuntimeError("Max retries exceeded")))
 
 
+class ProudoveCteni(unittest.TestCase):
+    """Bez ijson se soubor RVZ (GB) nesmi nacist cely do pameti - cte se po zaznamech."""
+    def test_pole_i_objekt(self):
+        import io
+        import json
+        from ts.sources import rvz
+        zaznamy = [{"id": i, "nazev": "text s [{ uvnitř", "x": {"a": [1, {"b": None}]}} for i in range(500)]
+        for data in (zaznamy, {"meta": {"verze": "2"}, "zakazky": zaznamy}):
+            for odsazeni in (None, 2):
+                raw = b"\xef\xbb\xbf" + json.dumps(data, ensure_ascii=False, indent=odsazeni).encode()
+                self.assertEqual(list(rvz._iter_stdlib(io.BytesIO(raw), blok=97)), zaznamy)
+
+    def test_bez_ijson_nepouzije_json_load(self):
+        import io
+        import json
+        from ts.sources import rvz
+        raw = json.dumps([{"id": 1}, {"id": 2}]).encode()
+        with mock.patch.object(rvz, "ijson", None), mock.patch.object(rvz.json, "load", side_effect=AssertionError):
+            self.assertEqual([r["id"] for r in rvz._iter_json_stream(io.BytesIO(raw))], [1, 2])
+
+
 if __name__ == "__main__":
     unittest.main()

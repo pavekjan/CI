@@ -257,6 +257,8 @@ def run_update(rezim):
             cfg["obor"] = "vse"
             if rezim == "rychle":
                 cfg.update({"mesice": 3, "smlouvy_mesice": 0, "ares_max_firem": 30})
+            elif rezim == "denni":  # kazdodenni doplneni: posledni mesice zakazek + aktualni mesic Registru smluv
+                cfg.update({"mesice": 3, "smlouvy_mesice": 1, "ares_max_firem": 40})
             else:
                 cfg.update({"mesice": cfg.get("mesice", 12), "smlouvy_mesice": cfg.get("smlouvy_mesice", 3), "ares_max_firem": 100})
             con = connect(STATE["db"])

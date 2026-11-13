@@ -1,7 +1,10 @@
 """Aktualizace dat bez spusteni webu (pro aktualizovat_online.bat a GitHub Actions).
 
-    python aktualizovat_db.py            # plna aktualizace (zakazky za 12 mesicu + Registr smluv)
+    python aktualizovat_db.py            # denni: posledni 3 mesice zakazek + aktualni mesic Registru smluv
+    python aktualizovat_db.py --plny     # plna: zakazky za 12 mesicu + 3 mesice Registru smluv
     python aktualizovat_db.py --rychle   # jen poslednich par mesicu, bez Registru smluv
+
+Uz zpracovane mesice se preskakuji a stazene soubory se berou z cache (data/cache), starsi data v databazi zustavaji.
 
 Vraci chybovy kod, kdyz se nepodari stahnout zadne zakazky (napr. server ISVZ neodpovida).
 """
@@ -17,7 +20,7 @@ from ts.util import load_config  # noqa: E402
 
 
 def main():
-    rezim = "rychle" if "--rychle" in sys.argv else "plny"
+    rezim = "plny" if "--plny" in sys.argv else "rychle" if "--rychle" in sys.argv else "denni"
     server.STATE["cfg"] = load_config()
     server.run_update(rezim)
     con = connect(server.STATE["db"])
