@@ -30,7 +30,8 @@ def _text(el, name):
 def fetch_index(base):
     r = http_get(base + "index.xml", timeout=60)
     r.raise_for_status()
-    root = ET.fromstring(r.content)
+    # bezpecnost: viz SECURITY.md (XML z overenych statnich zdroju, expat >= 2.4.1) (vedome potlaceni nalezu banditu, viz SECURITY.md)
+    root = ET.fromstring(r.content)  # nosec B314
     dumps = []
     for d in root.iter():
         if _local(d.tag) != "dump":
@@ -57,7 +58,8 @@ def fetch_dump(dump):
 
 def iter_smlouvy(xml_path):
     """Streamovane cteni dumpu, vraci dict pro kazdou platnou verzi smlouvy."""
-    for event, el in ET.iterparse(xml_path, events=("end",)):
+    # bezpecnost: viz SECURITY.md (vedome potlaceni nalezu banditu, viz SECURITY.md)
+    for event, el in ET.iterparse(xml_path, events=("end",)):  # nosec B314
         if _local(el.tag) != "zaznam":
             continue
         try:

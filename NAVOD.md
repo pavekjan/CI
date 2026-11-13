@@ -1,118 +1,246 @@
-# TenderScope – návod ke spuštění (Windows)
+# TenderScope – návod (Windows)
 
-**TenderScope** je multiagentní systém pro competitive intelligence ve veřejných zakázkách.
-Podporuje rozhodnutí: *„Máme se ucházet o tuto zakázku, a jak si stojíme proti konkurenci?“*
+**TenderScope** je webová aplikace pro competitive intelligence ve veřejných zakázkách.
+Zadáte libovolnou firmu (název nebo IČO) a aplikace z otevřených dat státu spočítá, jak je
+konkurenceschopná: kolik vyhrává, s jakou úspěšností, za jaké ceny vůči předpokládané hodnotě,
+u kterých zadavatelů, v jakých segmentech, proti komu soutěží a kde by mohla soutěžit teď.
+Nově umí i **onboarding firmy**: z IČO sestaví profil firmy, položí 4 cílené otázky a hned ukáže
+**Day-0 zpravodaj** – zakázky z posledních 14 dní, každou s dotazníkem vhodnosti (předmět, vzdálenost, velikost, čas…).
+
+### Přechod z předchozí verze (máte už staženo)
+1. V černém okně stiskněte **Ctrl+C** a okno zavřete.
+2. Rozbalte nový `tenderscope.zip` **přes starou složku** (Windows: „Nahradit soubory v cíli“).
+   Složka `data` se nepřepíše, stažená data zůstanou.
+3. Spusťte **`TenderScope.bat`**. Při startu si doinstaluje novou knihovnu (`anthropic`), trvá to pár sekund.
+4. **Data → Rychlá aktualizace.** Průběh se teď vypisuje každých 5 sekund („zpracováno N záznamů“).
+   Jeden měsíc trvá zhruba 1–3 minuty. Dřív se zpracování zdánlivě zaseklo, protože program zbytečně
+   procházel stovky dokumentů u každé zakázky a nic nevypisoval.
 
 ## 1. Instalace (jednou, cca 5 minut)
 
-1. Nainstalujte **Python 3.10 nebo novější** z https://www.python.org/downloads/
+1. Nainstalujte **Python 3.10+** z https://www.python.org/downloads/
    – při instalaci **zaškrtněte „Add python.exe to PATH“**.
-2. Rozbalte ZIP `tenderscope.zip` např. do `C:\TenderScope`.
-3. Dvakrát klikněte na **`spustit.bat`**. Při prvním spuštění si sám vytvoří prostředí
-   a nainstaluje dvě knihovny (`requests`, `ijson`).
+2. Rozbalte `tenderscope.zip`, např. do `C:\TenderScope`.
+3. Dvakrát klikněte na **`TenderScope.bat`**. Při prvním spuštění se samo nainstaluje vše potřebné
+   a aplikace se otevře v prohlížeči na adrese http://127.0.0.1:8765
 
-## 2. Spuštění
+Node.js **nepotřebujete**. Frontend (TypeScript + React) je už sestavený ve složce `web/dist`.
 
-`spustit.bat` nabídne menu:
+## 2. První spuštění s reálnými daty
 
-| Volba | Co udělá |
+1. V aplikaci otevřete záložku **Data** a klikněte na **Rychlá aktualizace**.
+   Stáhnou se zakázky ze všech oborů za poslední 3 měsíce. Stažení měsíce trvá chvilku (desítky MB),
+   zpracování zhruba 1–3 minuty na měsíc. Průběh vidíte v logu přímo na stránce, aktualizuje se každých 5 sekund.
+2. Až se objeví „✓ hotovo“, vraťte se na **Firmy** a zadejte firmu.
+3. Až budete chtít delší historii a ověřování vítězů v Registru smluv, spusťte **Plnou aktualizaci**
+   (12 měsíců + Registr smluv). První plný běh trvá déle (dumpy Registru smluv mají stovky MB) a zabere
+   několik GB na disku. Další běhy stahují a zpracovávají jen to, co se změnilo.
+
+Okno s černou konzolí nechte otevřené – to je server aplikace. Zavřením okna aplikaci ukončíte.
+
+**Demo:** `spustit.bat` → volba 2 spustí aplikaci s vymyšlenými firmami bez internetu (na ukázku).
+
+## 3. Co aplikace ukazuje
+
+| Část | Co znamená |
 |---|---|
-| 1 – Demo | Celý workflow na **umělých** datech (vymyšlené firmy), bez internetu. Vhodné na prezentaci a kontrolu, že vše funguje. |
-| 2 – Ostrý běh IT | Stáhne skutečná data za 12 měsíců a vytvoří brief pro IT služby. |
-| 3 – Ostrý běh stavebnictví | Totéž pro stavebnictví (CPV 45, 71). |
-| 4 – Přepočítat | Nic nestahuje, jen znovu spočítá analýzu a brief z dat, která už máte. |
-| 5 – Firma z ARES | Vypíše profil firmy podle IČO. |
+| **Skóre konkurenceschopnosti 0–100** | vážený průměr 5 složek, každá s vysvětlením (viz níže) |
+| Vyhrané zakázky, účasti, win rate | win rate se počítá jen ze soutěží, kde zdroj uvádí i neúspěšné účastníky |
+| Objem výher, medián zakázky | součet smluvních cen bez DPH |
+| Cena vs. předpokládaná hodnota | medián poměru vítězné ceny k odhadu zadavatele, srovnaný s trhem ve stejných segmentech |
+| Výhry po měsících | výhry / objem / účasti v čase |
+| Segmenty | oddíly CPV, podíl firmy na objemu segmentu a její pořadí |
+| Největší zákazníci | zadavatelé podle objemu |
+| Graf ceny | každá zakázka jako bod – pod čárou = levnější než odhad |
+| Přímé souboje | konkurenti, se kterými se firma potkala v téže soutěži, a kdo vyhrál |
+| Hlavní rivalové | kdo vyhrává nejvíc ve stejných segmentech |
+| Kde by mohla soutěžit teď | otevřené zakázky v jejích segmentech, zvýrazněné u stávajících klientů |
+| Zakázky | seznam výher i neúspěchů s odkazem na NEN, „RS ✓“ = smlouva nalezena v Registru smluv |
 
-Nebo z příkazové řádky (ve složce projektu):
+**Skóre** (váhy): úspěšnost v soutěžích 25 % (win rate vs. medián trhu) · tržní pozice 25 % (percentil objemu
+a podíl v segmentech) · cenová konkurenceschopnost 20 % (o kolik levněji než trh vítězí) · šíře klientské
+základny 15 % (počet zadavatelů a závislost na největším) · dynamika 15 % (posledních 6 měsíců vs. předchozích 6).
+Když pro složku chybí data, vynechá se a váhy se přepočítají. 65+ = vysoká, 40–64 = střední, pod 40 = nízká.
 
-```
-.venv\Scripts\python tenderscope.py run --obor it --mesice 12 --ico 12345678
-.venv\Scripts\python tenderscope.py run --tydenni --ano
-.venv\Scripts\python tenderscope.py firma 27082440
-.venv\Scripts\python tenderscope.py inspect
-```
+Záložka **Trh** ukazuje celý trh nebo vybraný segment: počty zakázek v čase, kdo vyhrává, regiony.
 
-**První ostrý běh trvá déle** (desítky minut až hodina podle připojení): stahuje se ~12 měsíčních
-ZIPů z Registru veřejných zakázek a XML dumpy Registru smluv (každý stovky MB). Vše se ukládá
-do `data\cache`, takže další běhy jsou rychlé. Na disku počítejte s několika GB.
+## 4. Onboarding firmy a Day-0 zpravodaj
 
-## 3. Výstupy (složka `vystupy`)
+Záložka **Onboarding** (nebo tlačítko „Onboarding a zpravodaj“ na profilu firmy):
 
-- `brief_RRRR-MM-DD.html` – brief pro vedení (otevře se v prohlížeči): shrnutí, doporučení BID / ZVÁŽIT / NO-BID,
-  KIQ 1–5, konkurence, zprávy, kvalita dat. Dokud brief neschválíte, jmenuje se `..._NAVRH`.
-- `zakazky.csv`, `konkurenti.csv`, `prilezitosti.csv` – tabulky pro Excel (oddělovač středník, čeština funguje).
-- `data\tenderscope.db` – SQLite databáze se vším (lze otevřít např. v DB Browser for SQLite).
+1. **Firma** – zadáte IČO, volitelně web firmy, a kliknete **Spustit rešerši**.
+2. **Recon agent** potichu (paralelně) vytáhne: ARES (název, sídlo, NACE), historii firmy v databázi zakázek
+   (výhry, účasti, CPV, zadavatelé, kraje, typická velikost zakázky), Registr smluv, Hlídač státu (smlouvy za 3 roky,
+   jen s tokenem) a text z webu firmy.
+3. **Onboarding agent – fáze 1** shrne hypotézu („firma z Ostravy dělá silnice, medián zakázky 7 mil. Kč…“)
+   a položí **4 otázky s klikacími předvolbami**: předmět a exkluze, rozpočet a čas na přípravu,
+   regiony/dojezd (u IT místo toho model spolupráce), kvalifikace dle ZZVZ a konsorcia.
+4. **Fáze 2** sestaví `company_profile` JSON: 8místné CPV (hlavní i vedlejší), klíčová a negativní slova,
+   regiony CZ-NUTS 3, max. vzdálenost, rozpočet, min. dní na přípravu, kvalifikace, dealbreakery, whitelist zadavatelů.
+   Profil jde na stránce upravit (CPV, kraje, rozpočet…), uložit a stáhnout jako JSON.
+5. **Day-0 zpravodaj** – profil se okamžitě spáruje se zakázkami za posledních 14 dní (a se všemi ještě otevřenými).
+   Každá zakázka má **dotazník vhodnosti** (kliknutím se rozbalí):
 
-## 4. Nastavení (`config.json`, otevřete v Poznámkovém bloku)
-
-| Položka | Význam |
-|---|---|
-| `obor` | `it` nebo `stavebnictvi` |
-| `mesice` | kolik měsíců zpět (KIQ 1 = 12) |
-| `smlouvy_mesice` | kolik měsíců Registru smluv stáhnout (výchozí 3, dumpy jsou velké) |
-| `nase_ico` | IČO „naší“ firmy → KIQ 5 (win rate, cenová hladina, silné segmenty) |
-| `hlidac_token` | volitelný token Hlídače státu |
-| `schvaleni` | `true` = před finálním briefem se ptá člověka (lidské schválení) |
-| `obory` | CPV prefixy a klíčová slova oboru – tady lze obor zúžit nebo rozšířit |
-
-## 5. Zdroje dat – kde je a kde není registrace
-
-| Zdroj | Registrace | Co z něj bereme | Adresa |
-|---|---|---|---|
-| Registr veřejných zakázek – open data ISVZ (obsahuje NEN, Věstník VZ, Tender arenu, TENDERMARKET) | **ne** | zakázky, CPV, hodnoty, lhůty, kritéria, účastníci, vítězové | `isvz.nipez.cz/.../opendata-rvz/VZ-MM-RRRR.zip` (měsíčně, ~5. den; od 2/2024) |
-| Registr smluv – open data | **ne** | uzavřené smlouvy a skutečné ceny, ověření vítězů | `data.smlouvy.gov.cz/index.xml` + `dump_RRRR_MM.xml` |
-| ARES | **ne** | profil konkurentů (název, sídlo, kraj, NACE, zánik) | `ares.gov.cz/ekonomicke-subjekty-v-be/rest/ekonomicke-subjekty/{IČO}` |
-| Google News RSS | **ne** | kontext – zprávy o oboru a konkurentech | `news.google.com/rss/search?q=...` |
-| Hlídač státu API | **ano, zdarma** (účet → https://www.hlidacstatu.cz/api → token) | doplňkový zdroj zakázek | `api.hlidacstatu.cz/api/v2/verejnezakazky/hledat` |
-
-Token Hlídače státu vložte do `config.json` → `"hlidac_token": "váš_token"`. Bez něj systém funguje,
-Hlídač je jen doplněk. ČSÚ DataStat jsme nezapojili – pro KIQ 1–5 není potřeba.
-
-**Opravy oproti ukázkovému skriptu, který jste měli:** adresa ARES byla neúplná (`https://ares.gov.cz{ico}`),
-správně je výše; obory NACE jsou v poli `czNace2008`. Hlídač státu chce hlavičku `Authorization: Token ...`
-a endpoint `/api/v2/verejnezakazky/hledat`.
-
-## 6. Jak systém funguje (agenti)
-
-```
- Orchestrátor ─┬─ Scout ── stáhne RVZ/NEN/VVZ → Extractor (záznam po záznamu) → filtr oboru → DB
-               ├─ Scout ── Hlídač státu (volitelně), Registr smluv, ARES, zprávy RSS → DB
-               ├─ Verifier ── IČO checksum, duplicity, chybějící data, křížové ověření vítěze v Registru smluv,
-               │              odlehlé ceny, zaniklé firmy (ARES)
-               ├─ Analyst ── KIQ 1–5 + bid/no-bid skóre otevřených zakázek
-               ├─ Briefer ── brief (MD + HTML) + CSV
-               └─ lidské schválení → finální brief
-```
-
-| Agent | Soubor | Úkol |
+| Otázka | Jak se odpovídá | Váha |
 |---|---|---|
-| Scout | `ts/scout.py`, `ts/sources/*` | sleduje zdroje, stahuje, detekuje nové zakázky |
-| Extractor | `ts/extractor.py` | CPV, lhůty, předpokládaná hodnota, kritéria, zadavatel, účastníci, vítězové |
-| Verifier | `ts/verifier.py` | křížová kontrola zdrojů, duplicity, chybějící data |
-| Analyst | `ts/analyst.py` | profily konkurentů, win rate, cenové benchmarky, trendy, příležitosti |
-| Briefer | `ts/briefer.py` | denní/týdenní brief s doporučením |
-| Orchestrátor | `ts/orchestrator.py` | pořadí kroků, log běhů (tabulka `behy`), lidské schválení |
+| Odpovídá předmět tomu, co děláme? | shoda CPV s profilem + textová podobnost (TF-IDF) | 30 |
+| Vyplatí se nám tam jezdit? | vzdálenost sídla od místa plnění (km po silnici, odhad) a regiony z profilu; u IT jen informativně | 20 |
+| Sedí velikost na naši kapacitu? | předpokládaná hodnota vs. rozpočet z profilu | 15 |
+| Stihneme připravit nabídku? | dny do lhůty vs. min. dní na přípravu | 10 |
+| Známe zadavatele? | dosavadní klient / nový / blacklist | 10 |
+| Jak silná je konkurence? | průměrný počet nabídek a dominance největšího dodavatele v segmentu | 10 |
+| Splníme kvalifikaci, máme reference? | **odpovídáte vy** (ano / ne / nevím) | 5 |
+| Máme v termínu volnou kapacitu? | **odpovídáte vy** (ano / ne / nevím) | 10 |
 
-**KIQ → kde v briefu:** KIQ 1 (co bylo vyhlášeno) · KIQ 2 (kdo vyhrává, ceny, win rate) · KIQ 3 (typické
-hodnoty, kritéria, počty nabídek) · KIQ 4 (otevřené a zrušené zakázky + skóre) · KIQ 5 (naše pozice).
+Výsledek: skóre 0–100 a verdikt **doporučeno** (70+), **zvážit** (50–69), **spíš ne**, nebo **nevhodné**, když platí
+vylučující důvod: např. firma z Ostravy s limitem 100 km a zakázka v Mostě (~400 km), hodnota 3× nad kapacitou,
+vyloučené slovo v názvu, odpověď „ne“ u kvalifikace nebo kapacity.
 
-**Bid/no-bid skóre (0–100)** je záměrně pravidlové a vysvětlitelné: shoda s oborem, velikost vs. naše obvyklé
-zakázky, intenzita konkurence v segmentu (průměrný počet nabídek), vztah k zadavateli (naše výhry / dominantní
-konkurent), čas do podání. Každé doporučení má vypsané důvody.
+**Umělá inteligence (nepovinné, doporučené):** na stránce **Data → Umělá inteligence** si vyberete poskytovatele
+(Anthropic Claude, OpenAI, Google Gemini, Mistral, OpenRouter, lokální Ollama zdarma, nebo vlastní OpenAI-kompatibilní API),
+vložíte klíč, tlačítkem **Načíst modely** vyberete model, **Vyzkoušet** ověří spojení a **Uložit a používat** ho zapne.
+Otázky a profil pak píše vybraný model podle vašeho promptu (soubor `ts/prompty/onboarding_system.md`, jde upravit).
+Bez klíče (nebo když API selže) se použijí **pravidla** se stejným výstupem, aplikace tedy funguje vždy.
+U profilu je vidět, kdo ho sestavil („Agent: Google Gemini (…)“ / „Agent: pravidla“). Podrobně v README, kapitola 7.
 
-## 7. Omezení, která je fér uvést v práci
+**Proč ne PostgreSQL + pgvector:** pro jednoho uživatele na Windows by to znamenalo instalovat a spravovat databázový
+server. TenderScope drží vše v jednom souboru SQLite a „embedding“ počítá lokálně (TF-IDF nad názvy zakázek a CPV),
+na desítky tisíc zakázek to stačí a běží to za sekundy. Při nasazení pro víc firem by se přešlo na PostgreSQL + pgvector
+a embeddingy z API, rozhraní by zůstalo stejné.
 
-- Open data RVZ vycházejí **jednou měsíčně** (~5. den), data začínají **únorem 2024**. Pro „dnešní“ výzvy je potřeba
-  sledovat profily zadavatelů / NEN nebo Hlídač státu.
-- Struktura JSON v RVZ se mění s verzí dokumentace (2.6 → 2.10). Extractor proto hledá pole podle významu, ne podle
-  pevné cesty. Kdyby něco chybělo (např. prázdné CPV), spusťte `tenderscope.py inspect` – vypíše skutečné klíče
-  prvního záznamu a co z něj Extractor vytáhl; pravidla se dolaďují v `ts/extractor.py`.
-- Win rate jde spočítat jen tam, kde data uvádějí účastníky (u malých zakázek často chybí).
-- Registr smluv obsahuje osobní údaje (GDPR) – data držte jen pro účely projektu.
-- Demo data jsou vymyšlená a slouží jen k ukázce.
+## 5. Export do Obsidianu (knowledge graph)
 
-## 8. Automatické denní spouštění (volitelně)
+1. Na stránce **Data → Obsidian a Exa** vložte cestu ke složce svého trezoru, např.
+   `C:\Users\<jméno>\OneDrive\...\9.semestr\CI\Obsidian\Jan`, a klikněte **Uložit**.
+2. Otevřete profil firmy a klikněte **Export do Obsidianu**. Do trezoru se zapíše složka `TenderScope`
+   (případně ji stáhnete jako ZIP a rozbalíte do trezoru ručně).
+3. V Obsidianu otevřete `TenderScope/00_Prehled/<firma> – dossier` a graf (**Ctrl+G**). V nastavení grafu si
+   přidejte **Groups** podle cesty (`path:TenderScope/01_Firmy` červeně, `/02_Zadavatele`, `/03_Zakazky`, `/06_Zdroje`…).
 
-Plánovač úloh Windows → Vytvořit základní úlohu → Denně 7:00 → Spustit program:
-`C:\TenderScope\.venv\Scripts\python.exe`, argumenty `tenderscope.py run --ano --neotvirat`,
-„Spustit v“: `C:\TenderScope`.
+Struktura je stejná jako u DD trezoru (entity – zjištění – důkazy):
+
+| Složka | Poznámky | Odkazuje na |
+|---|---|---|
+| 00_Prehled | dossier: skóre, KIQ, konkurenti, příležitosti, vložená mapa | vše |
+| 01_Firmy | cílová firma a konkurenti (IČO, sídlo, souboje) | zakázky, zdroje |
+| 02_Zadavatele | zákazníci a jejich zakázky | firma, zakázky |
+| 03_Zakazky | zadavatel, vítěz, účastníci, segment, ceny, kritéria | firmy, zadavatel, segment, zdroje |
+| 04_Segmenty | oddíly CPV, podíl a pořadí firmy | zakázky |
+| 05_Zjisteni | F-…: fakt, zdroj, inference, alternativní hypotéza, dopad pro bid/no-bid | zdroje |
+| 06_Zdroje | S-…: důkazy s Admiralty ratingem (A1 registry, C3 web) a odkazem | – |
+| 07_Mapy | canvas mapa: firma, konkurenti (popisek = skóre soubojů), zákazníci, segmenty | – |
+
+Každé tvrzení má odkaz na zdroj. Export více firem do stejného trezoru graf propojí přes společné
+zadavatele, zakázky a konkurenty.
+
+**Exa (nepovinné):** když vložíte Exa API klíč (dashboard.exa.ai), export i profil firmy dohledají na webu
+zmínky o firmě a uloží je jako zdroje s ratingem C3. Bez klíče se použijí jen Google News.
+
+## 6. Zdroje dat
+
+| Zdroj | Registrace | Co z něj bereme |
+|---|---|---|
+| Registr veřejných zakázek – open data ISVZ (NEN, Věstník VZ, Tender arena, TENDERMARKET) | **ne** | zakázky, CPV, hodnoty, lhůty, kritéria, účastníci, vítězové, ceny |
+| Registr smluv – open data (data.smlouvy.gov.cz) | **ne** | uzavřené smlouvy, křížové ověření vítězů |
+| ARES | **ne** | název, sídlo, NACE, vznik/zánik; vyhledání firmy podle názvu, pokud není v datech |
+| Google News RSS | **ne** | zprávy o firmě |
+| Hlídač státu API | token zdarma | volitelně smlouvy firmy za 3 roky (onboarding) a textový brief (`config.json` → `hlidac_token`) |
+| Web firmy | **ne** | popis činnosti pro onboarding (když zadáte URL) |
+| Claude API (Anthropic) | klíč, placené dle spotřeby | volitelně Onboarding agent (otázky a profil) |
+
+## 7. Co je potřeba ověřit na vašem počítači (důležité)
+
+Aplikace byla vyvinuta a otestována na **umělých datech ve stejném formátu**, protože vývojové prostředí
+nemělo přístup na státní servery. Adresa a formát ARES jsou ověřené na skutečné odpovědi. Registr smluv
+a open data ISVZ jsou napsané podle oficiální dokumentace, ale skutečnou strukturu JSON v datech ISVZ
+(mění se s verzemi 2.6 → 2.10) jsem neviděl. Extractor proto hledá pole podle významu.
+
+Po první Rychlé aktualizaci zkontrolujte:
+1. V logu u každého měsíce „RVZ MM/RRRR: N zaznamu…“ – N by mělo být v desítkách tisíc.
+2. Na úvodní stránce nenulový počet dodavatelů a vítězných nabídek.
+3. Profil známé firmy, např. hledejte „Alza“ nebo IČO 27082440.
+
+Když něco nesedí (chybí ceny, CPV nebo vítězové): v aplikaci **Data → Diagnostika** zadejte IČO firmy, u které
+to vidíte (výchozí je Škoda Auto 00177041), klikněte **Spustit diagnostiku → Kopírovat výpis** a výpis pošlete.
+Ukáže skutečný záznam s touto firmou, kde v datech leží CPV, ceny a dodavatelé, a co z toho Extractor vyčetl;
+pravidla v `ts/extractor.py` se podle něj doladí.
+
+**Po nové verzi Extractoru** se při další aktualizaci už stažené měsíce zpracují znovu (nestahují se), aby se
+opravy projevily i na starších datech. V logu uvidíte „Nová verze Extractoru…“.
+
+## 8. Struktura projektu (pro tým / práci)
+
+```
+server.py            backend: HTTP server + JSON API + spouštění agentů na pozadí
+ts/scout.py          agent Scout – stahování zdrojů, detekce nových dat, cache
+ts/extractor.py      agent Extractor – CPV, lhůty, hodnoty, kritéria, účastníci, vítězové
+ts/verifier.py       agent Verifier – IČO, duplicity, chybějící data, ověření v Registru smluv
+ts/obsidian.py       export do Obsidianu (knowledge graph) a volitelné Exa
+ts/api.py            agent Analyst pro aplikaci – profil firmy, skóre, souboje, trh
+ts/onboarding.py     Recon + Onboarding agent, dotazník vhodnosti, Day-0 zpravodaj (TF-IDF párování)
+ts/llm.py            volání AI (Claude, OpenAI, Gemini, Mistral, OpenRouter, Ollama, vlastní API), JSON výstup, záloha pravidly
+ts/prompty/          systémový prompt Onboarding agenta (váš prompt + schéma fáze 2)
+ts/analyst.py, ts/briefer.py, ts/orchestrator.py   textový brief (KIQ 1–5) pro příkazovou řádku
+web/src/             frontend v TypeScriptu (React + Recharts)
+web/dist/            sestavený frontend (to, co servíruje server.py)
+data/                databáze SQLite a cache stažených souborů
+```
+
+API: `GET /api/hledat?q=`, `GET /api/firma/<IČO>`, `GET /api/trh?segment=`, `GET /api/stav`,
+`POST /api/aktualizovat {"rezim":"rychle"|"plny"}`, `GET /api/beh`,
+`POST /api/onboarding/start {"ico","web"}`, `POST /api/onboarding/dokoncit {"ico","odpovedi"}`,
+`GET /api/onboarding/<IČO>`, `POST /api/onboarding/<IČO>/profil`, `GET /api/vhodnost/<IČO>?zakazka=<id>`.
+
+**Úpravy frontendu** (potřebujete Node.js 18+): ve složce `web` spusťte `npm install`, pak `npm run dev`
+(vývoj s živým náhledem na http://localhost:5173, server.py musí běžet) a nakonec `npm run build`
+(přegeneruje `web/dist`).
+
+## 9. Online verze zdarma (Render) a GitHub
+
+Aplikace jde dát na internet zdarma přes **Render.com**. Render si kód bere z **GitHubu**, takže nejdřív GitHub.
+Bezplatný Render má omezení: po 15 minutách bez návštěvy server usne a první otevření pak trvá asi minutu.
+Nemá trvalý disk, takže data si aplikace při každém startu vezme ze zabalené databáze (krok A) nebo je stáhne znovu.
+
+**A. Zabalená databáze (doporučeno, 1 minuta).** Ve složce TenderScope dvakrát klikněte na `pripravit_db.bat`.
+Ze složky `data` vytvoří `predpripravena_db\tenderscope.db.gz` (do 24 MB, víc GitHub přes prohlížeč nevezme). Když je databáze
+moc velká, sám vynechá Registr smluv a případně starší zakázky. Vaše původní data zůstanou beze změny.
+
+**B. GitHub (5 minut).**
+1. Na github.com se přihlaste (nebo zaregistrujte) a vpravo nahoře klikněte **+ → New repository**.
+2. Název třeba `tenderscope`, zvolte **Public** (nebo Private, Render umí obojí), nic dalšího nezaškrtávejte, **Create repository**.
+3. Na stránce nového repozitáře klikněte na odkaz **uploading an existing file**.
+4. Rozbalte `tenderscope.zip` znovu, ale do **nové prázdné** složky (třeba na plochu). Je v něm jen to,
+   co na GitHub patří, bez vašich dat a bez klíčů. Pokud jste udělali krok A, zkopírujte do její podsložky
+   `predpripravena_db` svůj soubor `tenderscope.db.gz`. Pak otevřete složku `tenderscope` a celý její **obsah**
+   (ne složku samotnou) přetáhněte do okna prohlížeče.
+5. Dole klikněte **Commit changes**. Klíče na GitHub nepatří: `config.json` je ponechán s prázdnými klíči.
+
+**C. Render (5 minut).**
+1. Na render.com klikněte **Get Started** a přihlaste se přes GitHub.
+2. **New → Blueprint**, vyberte repozitář `tenderscope` (případně **Configure account** a povolte mu přístup).
+3. Render načte `render.yaml` a zeptá se na proměnné: do **TS_ADMIN_HESLO** dejte svoje heslo,
+   `ANTHROPIC_API_KEY` a `HLIDAC_TOKEN` můžete nechat prázdné. Klikněte **Deploy Blueprint**.
+4. První sestavení trvá 3–5 minut. Pak dostanete adresu typu `https://tenderscope-xxxx.onrender.com`.
+
+**Jak se online verze chová.** Kdokoli s odkazem může prohlížet firmy, trh a dělat onboarding (bez AI, na pravidla).
+Aktualizaci dat, klíče a diagnostiku spustíte jen vy: v záložce **Data → Online verze** zadejte admin heslo.
+Klíč k AI zadávejte v Renderu (Environment → `LLM_POSKYTOVATEL` a např. `GEMINI_API_KEY`), ne do aplikace, aby po restartu nezmizel.
+Na Renderu má server jen 512 MB paměti a pomalý procesor, proto je lepší data připravit doma (krok A)
+a na serveru Plnou aktualizaci nespouštět.
+
+**Novou verzi** nahrajete tak, že soubory znovu přetáhnete na GitHub (stejný postup jako B.3–B.5). Render se sám přestaví.
+
+## 10. Omezení
+
+- Open data ISVZ vycházejí jednou měsíčně (~5. den) a začínají únorem 2024. Čerstvé výzvy z posledních dnů v nich nejsou.
+- Win rate jde spočítat jen tam, kde zdroj uvádí i neúspěšné účastníky.
+- Segment = oddíl CPV (první 2 číslice); firma soutěžící v úzké nice se srovnává se širším oddílem.
+- Registr smluv obsahuje osobní údaje (GDPR). Data držte jen pro účely projektu.
+- Zpravodaj „za posledních 14 dní“ se počítá od nejnovější zakázky v databázi. Open data vycházejí měsíčně,
+  proto jde spíš o ukázku (backtest) než o denní hlídání; aplikace to u zpravodaje napíše.
+- Vzdálenost je odhad: vzdušná čára × 1,25 mezi městem sídla (nebo krajským městem) a krajským městem místa plnění.
+  Open data uvádějí místo plnění jen na úrovni kraje (NUTS 3).
+- Historie firmy v onboardingu = to, co je v databázi (max. 12 měsíců zakázek, Registr smluv dle Plné aktualizace).
+  Tři roky smluv dodá jen Hlídač státu s tokenem.
+- Volání Claude API je napsané podle oficiální dokumentace a otestované na chybové stavy (neplatný klíč → pravidla),
+  ale s platným klíčem jsem ho spustit nemohl. Kdyby něco nesedělo, onboarding automaticky přejde na pravidla.

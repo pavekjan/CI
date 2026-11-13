@@ -6,7 +6,7 @@
   * ARES (profily konkurentu)                                   - bez registrace
 Detekuje nove zakazky (porovnani s databazi) a preda je Extractoru.
 """
-import json
+import os
 import time
 from datetime import date, datetime
 
@@ -19,13 +19,21 @@ A = "Scout"
 
 
 def _save_zakazka(con, zak, vit, uc):
+    """Ulozi zakazku. Open data obsahuji vic zaznamu tehoz rizeni (aktualizace) - novejsi zaznam
+    prepise jen to, co skutecne obsahuje; prazdna pole a vitezove z drivejsiho zaznamu zustanou."""
     now = datetime.now().isoformat(timespec="seconds")
-    existed = con.execute("SELECT 1 FROM zakazky WHERE id=?", (zak["id"],)).fetchone() is not None
+    old = con.execute("SELECT * FROM zakazky WHERE id=?", (zak["id"],)).fetchone()
+    existed = old is not None
+    if old:
+        old = dict(old)
+        zak = {k: (v if v not in (None, "", "neuvedeno") else old.get(k)) for k, v in zak.items()}
     cols = list(zak.keys()) + ["stazeno"]
     con.execute(f"INSERT OR REPLACE INTO zakazky ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
                 [zak[c] for c in zak] + [now])
-    con.execute("DELETE FROM vitezove WHERE zakazka_id=?", (zak["id"],))
-    con.execute("DELETE FROM ucastnici WHERE zakazka_id=?", (zak["id"],))
+    if vit:
+        con.execute("DELETE FROM vitezove WHERE zakazka_id=?", (zak["id"],))
+    if uc:
+        con.execute("DELETE FROM ucastnici WHERE zakazka_id=?", (zak["id"],))
     for v in vit:
         con.execute("INSERT OR REPLACE INTO vitezove (zakazka_id, dodavatel_ico, dodavatel_nazev, cena_bez_dph) VALUES (?,?,?,?)",
                     (zak["id"], v["dodavatel_ico"], v["dodavatel_nazev"], v["cena_bez_dph"]))
@@ -35,14 +43,41 @@ def _save_zakazka(con, zak, vit, uc):
     return not existed
 
 
+def _podpis(path):
+    st = os.stat(path)
+    return f"{st.st_size}-{int(st.st_mtime)}"
+
+
+def _uz_zpracovano(con, klic, path):
+    """True, pokud presne tento soubor (velikost+cas) uz byl zpracovan -> neni treba ho znovu parsovat."""
+    row = con.execute("SELECT podpis FROM soubory WHERE klic=?", (klic,)).fetchone()
+    return row is not None and row[0] == _podpis(path)
+
+
+def _oznac_zpracovano(con, klic, path):
+    con.execute("INSERT OR REPLACE INTO soubory VALUES (?,?)", (klic, _podpis(path)))
+    con.commit()
+
+
 def scout_rvz(con, cfg, today=None):
     """Stahne mesicni open data RVZ za poslednich N mesicu, Extractor z nich vytahne zakazky
     a ulozi jen ty relevantni pro obor (CPV prefix nebo klicove slovo)."""
     obor = cfg["obory"][cfg["obor"]]
+    vse = cfg["obor"] == "vse"  # aplikace: ukladame vsechny obory, aby slo profilovat libovolnou firmu
     base = cfg["zdroje"]["rvz_base"]
     nase = cfg.get("nase_ico") or None
     stats = {"souboru": 0, "zaznamu": 0, "relevantnich": 0, "novych": 0}
     months = months_back(cfg["mesice"] + 1, today)  # +1: aktualni mesic jeste neni zverejnen
+    verze = con.execute("SELECT podpis FROM soubory WHERE klic='extractor_verze'").fetchone()
+    if verze and verze[0] != str(extractor.EXTRACTOR_VERZE) or (not verze and con.execute("SELECT COUNT(*) FROM zakazky").fetchone()[0]):
+        # novy Extractor cte data jinak -> stare vytezene udaje zahodit a uz stazene soubory zpracovat znovu
+        log(A, f"Nová verze Extractoru ({extractor.EXTRACTOR_VERZE}): přepočítávám už stažené soubory (stahovat se znovu nebudou)")
+        for t in ("vitezove", "ucastnici", "zakazky", "priznaky", "dodavatele"):
+            # bezpecnost: t je konstanta z kodu (vedome potlaceni nalezu banditu, viz SECURITY.md)
+            con.execute(f"DELETE FROM {t}")  # nosec B608
+        con.execute("DELETE FROM soubory WHERE klic LIKE 'rvz:%'")
+    con.execute("INSERT OR REPLACE INTO soubory VALUES ('extractor_verze', ?)", (str(extractor.EXTRACTOR_VERZE),))
+    con.commit()
     for i, (y, m) in enumerate(months):
         if (y, m) < (2024, 2):
             continue
@@ -55,23 +90,36 @@ def scout_rvz(con, cfg, today=None):
             rvz.log_missing(y, m)
             continue
         stats["souboru"] += 1
+        klic = f"rvz:{os.path.basename(path)}:{cfg['obor']}:{nase or ''}:x{extractor.EXTRACTOR_VERZE}"
+        if _uz_zpracovano(con, klic, path):
+            log(A, f"RVZ {m:02d}/{y}: beze zmeny od minula -> preskakuji (uz je v databazi)")
+            continue
         n = rel = new = 0
+        t0 = t_log = time.time()
+        log(A, f"RVZ {m:02d}/{y}: zpracovavam soubor (prubeh se vypisuje kazdych par sekund)...")
         for rec in rvz.iter_records(path):
             n += 1
-            if n % 20000 == 0:
-                log(A, f"  {m:02d}/{y}: zpracovano {n} zaznamu...")
+            if n % 200 == 0 and time.time() - t_log >= 5:
+                t_log = time.time()
+                log(A, f"  {m:02d}/{y}: zpracovano {n} zaznamu ({n / max(t_log - t0, 0.1):.0f}/s), ulozeno {rel}")
+                con.commit()
             zak, vit, uc = extractor.extract(rec, "rvz")
             if not zak["id"]:
                 continue
-            duvod = extractor.relevance(zak, obor)
-            ours = nase and any(v["dodavatel_ico"] == nase for v in vit + uc)
+            if vse:
+                duvod = next((o["nazev"] for k, o in cfg["obory"].items() if k != "vse" and extractor.relevance(zak, o)), "ostatní")
+                ours = False
+            else:
+                duvod = extractor.relevance(zak, obor)
+                ours = nase and any(v["dodavatel_ico"] == nase for v in vit + uc)
             if not duvod and not ours:
                 continue
             zak["relevance"] = duvod or "naše účast"
             rel += 1
             new += _save_zakazka(con, zak, vit, uc)
         con.commit()
-        log(A, f"RVZ {m:02d}/{y}: {n} zaznamu, {rel} relevantnich, {new} novych")
+        _oznac_zpracovano(con, klic, path)
+        log(A, f"RVZ {m:02d}/{y}: {n} zaznamu, {rel} relevantnich, {new} novych ({time.time() - t0:.0f} s)")
         stats["zaznamu"] += n
         stats["relevantnich"] += rel
         stats["novych"] += new
@@ -84,6 +132,9 @@ def scout_hlidac(con, cfg):
         log(A, "Hlidac statu: token neni nastaven -> preskakuji (volitelny zdroj)")
         return {"preskoceno": True}
     obor = cfg["obory"][cfg["obor"]]
+    if not obor["cpv_prefixy"]:
+        log(A, "Hlidac statu: v rezimu 'vse obory' se nepouziva (open data RVZ pokryvaji vse)")
+        return {"preskoceno": True}
     dotaz = " OR ".join(f"cpv:{p}*" for p in obor["cpv_prefixy"][:4])
     log(A, f"Hlidac statu: dotaz '{dotaz}'")
     res = hlidac_zakazky(cfg["zdroje"]["hlidac_base"], token, dotaz)
@@ -109,9 +160,13 @@ def scout_smlouvy(con, cfg):
     icos = {r[0] for r in con.execute("SELECT DISTINCT dodavatel_ico FROM vitezove WHERE dodavatel_ico IS NOT NULL")}
     if cfg.get("nase_ico"):
         icos.add(cfg["nase_ico"])
+    pocet = int(cfg.get("smlouvy_mesice", 3) or 0)
+    if pocet <= 0:
+        log(A, "Registr smluv: vypnuto (smlouvy_mesice = 0) -> preskakuji")
+        return {"preskoceno": True}
     dumps = smlouvy.fetch_index(base)
     dumps.sort(key=lambda d: (d["rok"], d["mesic"]))
-    dumps = dumps[-cfg.get("smlouvy_mesice", 3):]
+    dumps = dumps[-pocet:]
     total = 0
     for d in dumps:
         try:
@@ -121,10 +176,14 @@ def scout_smlouvy(con, cfg):
             continue
         if not path:
             continue
+        klic = f"rs:{os.path.basename(path)}:{cfg['obor']}:{len(icos)}"
+        if _uz_zpracovano(con, klic, path):
+            log(A, f"Registr smluv {d['mesic']:02d}/{d['rok']}: beze zmeny od minula -> preskakuji")
+            continue
         n = rel = 0
         for s in smlouvy.iter_smlouvy(path):
             n += 1
-            if not s["id"] or not smlouvy.is_relevant(s, kws, icos):
+            if not s["id"] or (cfg["obor"] != "vse" and not smlouvy.is_relevant(s, kws, icos)):
                 continue
             rel += 1
             con.execute("INSERT OR REPLACE INTO smlouvy (id, predmet, datum_uzavreni, hodnota_bez_dph, hodnota_s_dph, "
@@ -135,6 +194,7 @@ def scout_smlouvy(con, cfg):
             for st in s["strany"]:
                 con.execute("INSERT INTO smlouvy_strany VALUES (?,?,?)", (s["id"], st["ico"], st["nazev"]))
         con.commit()
+        _oznac_zpracovano(con, klic, path)
         total += rel
         log(A, f"Registr smluv {d['mesic']:02d}/{d['rok']}: {n} smluv, {rel} relevantnich")
     return {"relevantnich_smluv": total}

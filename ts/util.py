@@ -26,18 +26,90 @@ except Exception:
     pass
 
 
+def je_tajne(k):
+    """Klice API a tokeny: nikdy do config.json v gitu."""
+    return k.endswith(("_api_key", "_token"))
+
+
+LOCAL_CONFIG = os.path.join(ROOT, "config.local.json")  # osobni nastaveni a klice, NIKDY do gitu
+
+
+def nacti_env_soubor(path=None):
+    """Nacte .env (KLIC=hodnota) do promennych prostredi. Soubor .env je v .gitignore."""
+    path = path or os.path.join(ROOT, ".env")
+    if not os.path.exists(path):
+        return
+    with open(path, encoding="utf-8") as f:
+        for radek in f:
+            radek = radek.strip()
+            if not radek or radek.startswith("#") or "=" not in radek:
+                continue
+            k, v = radek.split("=", 1)
+            v = v.strip().strip('"').strip("'")
+            if k.strip() and v:
+                os.environ.setdefault(k.strip(), v)
+
+
+def _presun_tajemstvi(path, cfg):
+    """Starsi verze ukladaly klice primo do config.json, ktery je v gitu. Presuneme je do
+    config.local.json (mimo git) a v config.json je smazeme (pravidlo 1: tajemstvi ne do repozitare)."""
+    nalezene = {k: v for k, v in cfg.items() if je_tajne(k) and v}
+    if not nalezene:
+        return
+    lokal = {}
+    if os.path.exists(LOCAL_CONFIG):
+        with open(LOCAL_CONFIG, encoding="utf-8") as f:
+            lokal = json.load(f)
+    for k, v in nalezene.items():
+        lokal.setdefault(k, v)
+    with open(LOCAL_CONFIG, "w", encoding="utf-8") as f:
+        json.dump(lokal, f, ensure_ascii=False, indent=2)
+    for k in nalezene:
+        cfg[k] = ""
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
+    print("Bezpecnost: API klice presunuty z config.json do config.local.json (ten se do gitu nenahrava).")
+
+
 def load_config(path=None):
     path = path or os.path.join(ROOT, "config.json")
     with open(path, encoding="utf-8") as f:
         cfg = json.load(f)
-    if os.environ.get("HLIDAC_TOKEN"):
-        cfg["hlidac_token"] = os.environ["HLIDAC_TOKEN"]
+    if os.path.abspath(path) == os.path.join(ROOT, "config.json"):
+        _presun_tajemstvi(path, dict(cfg))
+        for k in [k for k in cfg if je_tajne(k)]:
+            cfg[k] = ""
+    if os.path.exists(LOCAL_CONFIG):
+        with open(LOCAL_CONFIG, encoding="utf-8") as f:
+            cfg.update({k: v for k, v in json.load(f).items() if v not in (None, "")})
+    nacti_env_soubor()
+    # na serveru se klice zadavaji jako tajne promenne prostredi (nikdy ne do config.json na GitHubu)
+    for env, k in (("HLIDAC_TOKEN", "hlidac_token"), ("EXA_API_KEY", "exa_api_key"),
+                   ("ANTHROPIC_MODEL", "anthropic_model"), ("LLM_POSKYTOVATEL", "llm_poskytovatel")):
+        if os.environ.get(env):
+            cfg[k] = os.environ[env]
+    from . import llm  # klice vsech poskytovatelu AI (OPENAI_API_KEY, GROQ_API_KEY, ...)
+    llm.env_do_cfg(cfg)
+    # LLM_MODEL a LLM_URL plati pro vybraneho poskytovatele
+    prov = cfg.get("llm_poskytovatel") or "anthropic"
+    for env, pripona in (("LLM_MODEL", "model"), ("LLM_URL", "url")):
+        if os.environ.get(env):
+            cfg[f"{prov}_{pripona}"] = os.environ[env]
     return cfg
+
+
+LOG_SINKS = []  # server si sem prida funkci a posila log do webove aplikace
 
 
 def log(agent, msg):
     ts = datetime.now().strftime("%H:%M:%S")
-    print(f"[{ts}] {agent:<12} {msg}", flush=True)
+    line = f"[{ts}] {agent:<12} {msg}"
+    print(line, flush=True)
+    for sink in LOG_SINKS:
+        try:
+            sink(line)
+        except Exception:
+            pass
 
 
 def norm(s):
@@ -79,19 +151,23 @@ def parse_date(v):
     if isinstance(v, (date, datetime)):
         return v if isinstance(v, date) and not isinstance(v, datetime) else v.date()
     s = str(v).strip()
+    d = None
     m = re.match(r"(\d{4})-(\d{2})-(\d{2})", s)
     if m:
         try:
-            return date(int(m[1]), int(m[2]), int(m[3]))
+            d = date(int(m[1]), int(m[2]), int(m[3]))
         except ValueError:
             return None
-    m = re.match(r"(\d{1,2})\.\s*(\d{1,2})\.\s*(\d{4})", s)
-    if m:
-        try:
-            return date(int(m[3]), int(m[2]), int(m[1]))
-        except ValueError:
-            return None
-    return None
+    else:
+        m = re.match(r"(\d{1,2})\.\s*(\d{1,2})\.\s*(\d{4})", s)
+        if m:
+            try:
+                d = date(int(m[3]), int(m[2]), int(m[1]))
+            except ValueError:
+                return None
+    if d and not (2000 <= d.year <= 2045):  # preklepy v datech (napr. rok 0217)
+        return None
+    return d
 
 
 def ico_valid(ico):

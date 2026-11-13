@@ -1,39 +1,97 @@
 {
-  "_napoveda": "Hlavni nastaveni TenderScope. Obor prepinejte polozkou 'obor' (it / stavebnictvi) nebo parametrem --obor.",
-
+  "_napoveda": "Hlavni nastaveni TenderScope. Aplikace (server.py) stahuje vzdy vsechny obory ('vse'); 'obor' plati pro prikazovy brief (tenderscope.py run).",
   "obor": "it",
   "mesice": 12,
   "smlouvy_mesice": 3,
-
   "nase_ico": "",
   "nas_nazev": "",
-
   "hlidac_token": "",
-
   "ares_max_firem": 60,
   "zpravy_max_konkurentu": 5,
   "schvaleni": true,
-
   "obory": {
     "it": {
       "nazev": "IT služby a software",
-      "cpv_prefixy": ["72", "48", "302", "3223", "50312", "50320", "64216", "79342"],
-      "klicova_slova": ["software", "informacni system", "informacniho systemu", "aplikace", "licence", "cloud", "kyberneticke", "kybernetickou", "servery", "datove centrum", "ict", "it sluzby", "helpdesk", "sap", "microsoft", "vyvoj", "digitalizace", "sit lan", "sitova infrastruktura", "notebooky", "pocitace"],
+      "cpv_prefixy": [
+        "72",
+        "48",
+        "302",
+        "3223",
+        "50312",
+        "50320",
+        "64216",
+        "79342"
+      ],
+      "klicova_slova": [
+        "software",
+        "informacni system",
+        "informacniho systemu",
+        "aplikace",
+        "licence",
+        "cloud",
+        "kyberneticke",
+        "kybernetickou",
+        "servery",
+        "datove centrum",
+        "ict",
+        "it sluzby",
+        "helpdesk",
+        "sap",
+        "microsoft",
+        "vyvoj",
+        "digitalizace",
+        "sit lan",
+        "sitova infrastruktura",
+        "notebooky",
+        "pocitace"
+      ],
       "zpravy_dotaz": "veřejná zakázka IT informační systém"
     },
     "stavebnictvi": {
       "nazev": "Stavebnictví",
-      "cpv_prefixy": ["45", "71", "44", "4421", "4500"],
-      "klicova_slova": ["stavba", "stavebni", "rekonstrukce", "oprava silnice", "silnice", "chodnik", "most ", "kanalizace", "vodovod", "zatepleni", "revitalizace", "novostavba", "demolice", "projektova dokumentace", "technicky dozor", "komunikace"],
+      "cpv_prefixy": [
+        "45",
+        "71",
+        "44",
+        "4421",
+        "4500"
+      ],
+      "klicova_slova": [
+        "stavba",
+        "stavebni",
+        "rekonstrukce",
+        "oprava silnice",
+        "silnice",
+        "chodnik",
+        "most ",
+        "kanalizace",
+        "vodovod",
+        "zatepleni",
+        "revitalizace",
+        "novostavba",
+        "demolice",
+        "projektova dokumentace",
+        "technicky dozor",
+        "komunikace"
+      ],
       "zpravy_dotaz": "veřejná zakázka stavba rekonstrukce"
+    },
+    "vse": {
+      "nazev": "Všechny obory",
+      "cpv_prefixy": [],
+      "klicova_slova": [],
+      "zpravy_dotaz": "veřejná zakázka"
     }
   },
-
   "zdroje": {
     "rvz_base": "https://isvz.nipez.cz/sites/default/files/content/opendata-rvz/",
     "smlouvy_base": "https://data.smlouvy.gov.cz/",
     "ares_base": "https://ares.gov.cz/ekonomicke-subjekty-v-be/rest/ekonomicke-subjekty/",
     "hlidac_base": "https://api.hlidacstatu.cz/api/v2/",
     "zpravy_base": "https://news.google.com/rss/search"
-  }
+  },
+  "obsidian_vault": "",
+  "exa_api_key": "",
+  "anthropic_api_key": "",
+  "anthropic_model": "claude-opus-5-5"
 }

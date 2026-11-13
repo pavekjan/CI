@@ -7,6 +7,7 @@ from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta
 
 from .util import OUT_DIR, log, norm, parse_date
+from .bezpecnost import bunka_csv
 
 A = "Analyst"
 
@@ -64,7 +65,8 @@ def _write_csv(name, rows, header, prefix=None):
         w = csv.writer(f, delimiter=";")
         w.writerow(header)
         for r in rows:
-            w.writerow(["" if x is None else (f"{x:.2f}".replace(".", ",") if isinstance(x, float) else x) for x in r])
+            # bunka_csv: text zacinajici = + - @ by Excel spustil jako vzorec (CSV injection)
+            w.writerow(["" if x is None else (f"{x:.2f}".replace(".", ",") if isinstance(x, float) else bunka_csv(x)) for x in r])
     return path
 
 
