@@ -59,6 +59,12 @@ def _oznac_zpracovano(con, klic, path):
     con.commit()
 
 
+def je_nedostupny(e):
+    """Chyba spojeni (timeout, odmitnuti), ne chyba dat -> dalsi pokusy na stejny server nemaji smysl."""
+    t = str(e).lower()
+    return any(x in t for x in ("timed out", "timeout", "connection refused", "connecterror", "max retries", "name or service"))
+
+
 def scout_rvz(con, cfg, today=None):
     """Stahne mesicni open data RVZ za poslednich N mesicu, Extractor z nich vytahne zakazky
     a ulozi jen ty relevantni pro obor (CPV prefix nebo klicove slovo)."""
@@ -78,6 +84,7 @@ def scout_rvz(con, cfg, today=None):
         con.execute("DELETE FROM soubory WHERE klic LIKE 'rvz:%'")
     con.execute("INSERT OR REPLACE INTO soubory VALUES ('extractor_verze', ?)", (str(extractor.EXTRACTOR_VERZE),))
     con.commit()
+    nedostupne = 0  # server ISVZ nekdy z cloudu (napr. Render) vubec neodpovida -> nezkouset dalsi mesice
     for i, (y, m) in enumerate(months):
         if (y, m) < (2024, 2):
             continue
@@ -85,7 +92,15 @@ def scout_rvz(con, cfg, today=None):
             path = rvz.fetch_month(base, y, m, current=i >= len(months) - 3)
         except Exception as e:
             log(A, f"RVZ {m:02d}/{y}: chyba stahovani: {e}")
+            if je_nedostupny(e):
+                nedostupne += 1
+                if nedostupne >= 2:
+                    log(A, "RVZ: server ISVZ z tohoto pocitace/serveru neodpovida -> zbyvajici mesice preskakuji. "
+                           "Online verze bere data z GitHubu (aktualizovat_online.bat nebo GitHub Actions, viz README).")
+                    stats["nedostupne"] = True
+                    break
             continue
+        nedostupne = 0
         if not path:
             rvz.log_missing(y, m)
             continue

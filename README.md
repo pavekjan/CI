@@ -173,12 +173,43 @@ Aplikaci jde zdarma provozovat na internetu přes službu **Render.com**, takže
 **Jak ji zprovoznit (správce, jednou):**
 1. Na svém počítači ve složce aplikace dvakrát klikněte na **`pripravit_db.bat`**. Vytvoří zmenšenou kopii dat
    `predpripravena_db/tenderscope.db.gz` a tu nahrajte na GitHub spolu s aplikací.
+   **Tento krok je důležitý:** server zakázek (isvz.nipez.cz) z cloudových serverů často neodpovídá,
+   takže online verze si zakázky sama stáhnout nemusí. Aplikace to po dvou neúspěšných pokusech pozná a dál to nezkouší.
+   Na GitHub soubor nahrajete příkazem `git add -f predpripravena_db/tenderscope.db.gz`, pak `git commit` a `git push`.
 2. Na https://render.com klikněte **Get Started** a přihlaste se přes **GitHub**.
 3. Klikněte **New → Blueprint** a vyberte tento repozitář.
 4. Render se zeptá na **TS_ADMIN_HESLO**: vymyslete si heslo správce. Ostatní políčka můžete nechat prázdná.
 5. Klikněte **Deploy Blueprint**. Za 3–5 minut dostanete adresu `https://….onrender.com`.
 
 Každá další změna nahraná na GitHub se na Renderu sama projeví během pár minut.
+
+### Aby byla online data aktuální
+
+Server se zakázkami (isvz.nipez.cz) z cloudových serverů často neodpovídá, takže Render si zakázky sám
+nestáhne. Data proto stahuje jiný počítač a nahrává je na GitHub do zvláštní větve **`data`**
+(obsahuje jen jeden soubor a pokaždé se přepíše, takže repozitář neroste). Render si je při každém startu
+načte (`TS_DB_URL` v `render.yaml`). Bezplatný Render se po 15 minutách bez návštěvy uspí a při další
+návštěvě znovu nastartuje, takže nová data má prakticky hned.
+
+**Možnost A – automaticky na GitHubu (nic nemusíte mít zapnuté):**
+1. Na GitHubu otevřete záložku **Actions** → vlevo **Aktualizace dat** → **Run workflow**.
+2. Za 20–60 minut by měla svítit zelená fajfka. Pak to běží samo každé ráno.
+3. Když je červená a v logu je „server ISVZ … neodpovídá“, servery GitHubu jsou blokované také.
+   Pak použijte možnost B a v Actions u workflow zvolte **⋯ → Disable workflow**.
+
+**Možnost B – z vašeho počítače:** dvakrát klikněte na **`aktualizovat_online.bat`**. Stáhne čerstvá data
+a nahraje je na GitHub. Aby to běželo samo každý den, v PowerShellu ve složce aplikace spusťte jednou:
+
+```powershell
+$a = New-ScheduledTaskAction -Execute "$PWD\aktualizovat_online.bat" -Argument "/tichy" -WorkingDirectory "$PWD"
+Register-ScheduledTask -TaskName "TenderScope data" -Action $a -Trigger (New-ScheduledTaskTrigger -Daily -At 7am)
+```
+(Počítač musí být v tu dobu zapnutý. Zrušení: `Unregister-ScheduledTask -TaskName "TenderScope data"`.)
+
+**Jak čerstvá data vůbec jsou:** zakázky (open data ISVZ/RVZ) zveřejňuje stát po **měsících**. Soubor za
+uplynulý měsíc vychází během následujícího měsíce a poslední měsíce se ještě doplňují, takže zakázky jsou
+typicky do konce minulého měsíce. **Registr smluv** se doplňuje **denně** (smlouvy do včerejška).
+Úplně čerstvé zakázky po dnech nabízí API Hlídače státu (token zdarma, `HLIDAC_TOKEN`).
 
 ---
 

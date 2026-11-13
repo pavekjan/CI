@@ -671,6 +671,51 @@ def spust_aktualizaci(rezim):
     return True
 
 
+def stahni_databazi(url, cil, max_bajtu=500_000_000):
+    """Stahne zabalenou databazi (tenderscope.db.gz) z adresy v TS_DB_URL. Jen https na verejny server (SSRF),
+    velikost omezena, a pred pouzitim se overi, ze jde opravdu o databazi TenderScope. Pri chybe se nic nezmeni."""
+    import gzip
+    import sqlite3
+    import requests
+    tmp_gz, tmp_db = cil + ".dl.gz", cil + ".dl"
+    try:
+        url = bezpecnost.over_api_url(url, True)
+        print("Stahuji aktualni databazi z TS_DB_URL ...")
+        with requests.get(url, stream=True, timeout=60, allow_redirects=False) as r:
+            if r.status_code != 200:
+                raise RuntimeError(f"HTTP {r.status_code}")
+            got = 0
+            with open(tmp_gz, "wb") as f:
+                for chunk in r.iter_content(1 << 20):
+                    got += len(chunk)
+                    if got > max_bajtu:
+                        raise RuntimeError("soubor je prilis velky")
+                    f.write(chunk)
+        got = 0
+        with gzip.open(tmp_gz, "rb") as g, open(tmp_db, "wb") as f:
+            while True:
+                blok = g.read(1 << 20)
+                if not blok:
+                    break
+                got += len(blok)
+                if got > 4 * max_bajtu:
+                    raise RuntimeError("rozbalena databaze je prilis velka")
+                f.write(blok)
+        con = sqlite3.connect(tmp_db)
+        n = con.execute("SELECT COUNT(*) FROM zakazky").fetchone()[0]
+        con.close()
+        os.replace(tmp_db, cil)
+        print(f"Databaze stazena ({n} zakazek).")
+        return True
+    except Exception as e:  # zadna databaze ke stazeni (napr. vetev data jeste neexistuje) -> pokracujeme bez ni
+        print(f"Databazi z TS_DB_URL se nepodarilo pouzit: {str(e)[:200]}")
+        return False
+    finally:
+        for t in (tmp_gz, tmp_db):
+            if os.path.exists(t):
+                os.remove(t)
+
+
 def main():
     env = os.environ.get
     p = argparse.ArgumentParser()
@@ -692,6 +737,9 @@ def main():
             print("Pripravuji demo data (jednou, par sekund)...")
             import demo
             demo.build_demo_db(STATE["db"])
+    db_url = env("TS_DB_URL")  # aktualni databaze z vetve "data" na GitHubu (plni ji aktualizovat_online.bat / GitHub Actions)
+    if not a.demo and not os.path.exists(STATE["db"]) and db_url:
+        stahni_databazi(db_url, STATE["db"])
     pripravena = os.path.join(ROOT, "predpripravena_db", "tenderscope.db.gz")
     if not a.demo and not os.path.exists(STATE["db"]) and os.path.exists(pripravena):
         # server: zabalena databaze nahrana spolu s aplikaci (pripravit_db.py) -> rozbalime do data/

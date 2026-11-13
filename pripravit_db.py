@@ -1,6 +1,7 @@
 """Pripravi zmensenou kopii databaze pro online verzi (GitHub pres prohlizec bere soubory max. 25 MB).
 
     python pripravit_db.py              # vezme data/tenderscope.db -> predpripravena_db/tenderscope.db.gz
+    python pripravit_db.py --limit 95   # pro vetev "data" (git push bere soubory az do 100 MB)
 
 Puvodni databaze zustane beze zmeny. Kdyz je vysledek moc velky, skript postupne
 vynecha Registr smluv a pak starsi zakazky, dokud se nevejde pod limit.
@@ -17,7 +18,7 @@ ZDROJ = os.path.join(ROOT, "data", "tenderscope.db")
 CIL_DIR = os.path.join(ROOT, "predpripravena_db")
 CIL = os.path.join(CIL_DIR, "tenderscope.db.gz")
 TMP = os.path.join(ROOT, "data", "_online_kopie.db")
-LIMIT_MB = 24  # GitHub pres prohlizec bere soubory max. 25 MB
+LIMIT_MB = 24  # GitHub pres prohlizec bere soubory max. 25 MB (git push az 100 MB, viz --limit)
 
 
 def gz_velikost(path):
@@ -35,6 +36,9 @@ def smaz_stare(con, mesicu):
 
 
 def main():
+    global LIMIT_MB
+    if "--limit" in sys.argv:
+        LIMIT_MB = max(1, min(95, int(sys.argv[sys.argv.index("--limit") + 1])))
     if not os.path.exists(ZDROJ):
         print("Nenasel jsem data/tenderscope.db. Nejdriv v aplikaci spustte aktualizaci dat.")
         return 1
@@ -66,7 +70,7 @@ def main():
     os.remove(TMP)
     if mb > LIMIT_MB:
         os.remove(CIL)
-        print("Ani zmensena databaze se nevesla do 25 MB. Online verze si data stahne sama po startu.")
+        print(f"Ani zmensena databaze se nevesla do {LIMIT_MB} MB. Online verze si data stahne sama po startu.")
         return 1
     print(f"\nHotovo: predpripravena_db/tenderscope.db.gz ({mb:.1f} MB, {popis}).")
     print("Nahrajte tento soubor na GitHub spolu s aplikaci (slozka predpripravena_db).")

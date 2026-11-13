@@ -1,0 +1,41 @@
+# Kazdy den stahne cerstva data na serveru GitHubu a nahraje je do vetve "data".
+# Online verze (Render) si je odtud nacte pri startu (TS_DB_URL v render.yaml).
+# Jediny workflow s pravem zapisu (contents: write): potrebuje ho jen k prepsani vetve "data".
+# Kod z pull requestu tu nebezi (spousti se jen podle planu nebo rucne), akce jsou pripnute na SHA.
+name: Aktualizace dat
+
+on:
+  schedule:
+    - cron: "30 4 * * *"   # kazdy den v 5:30 / 6:30 ceskeho casu
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: aktualizace-dat
+  cancel-in-progress: false
+
+jobs:
+  data:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - name: Stahnout data (zakazky, Registr smluv, ARES)
+        env:
+          HLIDAC_TOKEN: ${{ secrets.HLIDAC_TOKEN }}
+        run: python aktualizovat_db.py
+      - name: Zabalit databazi
+        run: python pripravit_db.py --limit 95
+      - name: Nahrat do vetve data
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: python nahrat_data.py --remote "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"

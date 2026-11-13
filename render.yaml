@@ -7,6 +7,8 @@ services:
     region: frankfurt
     healthCheckPath: /api/stav
     envVars:
+      - key: TS_DB_URL           # aktualni databaze z vetve "data" (plni ji GitHub Actions nebo aktualizovat_online.bat)
+        value: https://raw.githubusercontent.com/pavekjan/CI/data/tenderscope.db.gz
       - key: TS_ADMIN_HESLO      # heslo spravce (aktualizace dat, klice, diagnostika)
         sync: false
       - key: LLM_POSKYTOVATEL    # nepovinne, napr. anthropic | openai | gemini | groq | openrouter_free | ovh (viz README, kap. 7)

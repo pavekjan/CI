@@ -56,7 +56,8 @@ dodavatelský řetězec (balíčky, GitHub Actions) a převzetí účtu na GitHu
 10. **Nasazení** – HTTPS zajišťuje Render (HSTS se posílá za HTTPS proxy), bezpečnostní hlavičky
     (CSP, X-Frame-Options, nosniff, Referrer-Policy, Permissions-Policy), žádný CORS, kontrola `Origin`
     a `Host`, rate limiting (120 požadavků/min, 10 náročných/min na IP), denní stropy placených API,
-    neprozrazujeme verzi Pythonu. GitHub Actions mají jen `contents: read` a akce připnuté na SHA.
+    neprozrazujeme verzi Pythonu. GitHub Actions mají jen `contents: read` a akce připnuté na SHA. Výjimkou je
+    workflow *Aktualizace dat* (`contents: write`), který jen přepisuje větev `data`; nespouští se z pull requestů.
 11. **Ověření** – `tests/test_bezpecnost.py` (nepřihlášený, špatné heslo, fail closed, dva uživatelé,
     SQL injection, path traversal, CSRF/CORS, DNS rebinding, SSRF, limity, hlavičky, tajemství v repozitáři)
     běží v CI při každém pushi spolu s pip-audit, npm audit, bandit a gitleaks.
