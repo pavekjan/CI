@@ -9,6 +9,9 @@
                                          # jen z ceskeho pocitace, Registr smluv doplnuje GitHub Actions)
     python aktualizovat_db.py --online-db auto --jen-registr
                                          # jen Registr smluv za 3 roky najednou (stahnout_registr_3roky.bat)
+    python aktualizovat_db.py --online-db auto --vse-najednou
+                                         # zakazky z ISVZ i Registr smluv za 3 roky v jednom behu
+                                         # (finalni_aktualizace.bat, na noc)
     python aktualizovat_db.py --ai 400   # navic: zbytek zakazek bez segmentu zkusi rozradit AI (max. 400 na beh)
 
 Uz zpracovane mesice se preskakuji a stazene soubory se berou z cache (data/cache), starsi data v databazi zustavaji.
@@ -55,6 +58,7 @@ def _pokrok(path):
 
 def main():
     rezim = ("rychle" if "--rychle" in sys.argv else "plny" if "--plny" in sys.argv
+             else "finalni" if "--vse-najednou" in sys.argv
              else "zakazky" if "--jen-zakazky" in sys.argv else "registr" if "--jen-registr" in sys.argv else "denni")
     server.STATE["cfg"] = load_config()
     if "--online-db" in sys.argv:

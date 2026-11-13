@@ -134,13 +134,19 @@ export default function Firma({ ico, prazdnaDb }: { ico: string; prazdnaDb?: boo
 
           {/* odkud data jsou */}
           <div className="callout info small">
-            <b>Dva zdroje, dvě čísla.</b>{" "}
-            <b>Soutěže (RVZ)</b>{p.obdobi?.rvz_od ? <> za {mesic(p.obdobi.rvz_od)} – {mesic(p.obdobi.rvz_do!)}</> : null}: větší zakázky vypsané ve
-            věstníku a na NEN. <b>Registr smluv</b>{p.obdobi?.rs_od ? <> za {mesic(p.obdobi.rs_od)} – {mesic(p.obdobi.rs_do!)}</> : null}: všechny
-            zveřejněné smlouvy nad 50 tis. Kč, tedy i malé zakázky a objednávky (např. z e-shopů), které v RVZ nejsou.{" "}
-            {p.hlidac && <a href={p.hlidac.url} target="_blank" rel="noreferrer">
-              {p.hlidac.pocet !== null ? <>Hlídač státu: {num(p.hlidac.pocet)} smluv za celou historii ↗</> : <>Ověřit na Hlídači státu ↗</>}
-            </a>}
+            <b>Proč jsou čísla jiná než na Hlídači státu?</b>{" "}
+            <b>Soutěže (RVZ)</b>{p.obdobi?.rvz_od ? <> za {mesic(p.obdobi.rvz_od)} – {mesic(p.obdobi.rvz_do!)}</> : null}: zakázky z věstníku
+            a NEN se známými účastníky. <b>Registr smluv</b>{p.obdobi?.rs_od ? <> za {mesic(p.obdobi.rs_od)} – {mesic(p.obdobi.rs_do!)}</> : null}: zveřejněné
+            smlouvy nad 50 tis. Kč, tedy i malé zakázky a objednávky. Hlídač státu ukazuje <b>celou historii od roku 2016</b> a navíc
+            zakázky malého rozsahu z profilů zadavatelů, proto má vyšší čísla.
+            {p.hlidac && <>
+              {" "}<a href={p.hlidac.url} target="_blank" rel="noreferrer">
+                {p.hlidac.pocet != null ? <>Hlídač: {num(p.hlidac.pocet)} smluv ↗</> : <>Smlouvy na Hlídači ↗</>}
+              </a>
+              {p.hlidac.zakazky_url && <>{" · "}<a href={p.hlidac.zakazky_url} target="_blank" rel="noreferrer">
+                {p.hlidac.zakazky != null ? <>Hlídač: {num(p.hlidac.zakazky)} zakázek jako dodavatel ↗</> : <>Zakázky na Hlídači ↗</>}
+              </a></>}
+            </>}
           </div>
 
           {/* KPI */}

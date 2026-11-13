@@ -84,7 +84,7 @@ export interface Profil {
     odberatele: { ico: string; nazev: string; pocet: number; objem: number }[];
   } | null;
   obdobi?: Obdobi;
-  hlidac?: { url: string; pocet: number | null };
+  hlidac?: { url: string; pocet: number | null; zakazky_url?: string; zakazky?: number | null };
   skore: { celkem: number | null; hodnoceni: string | null; slozky: Slozka[]; malo_dat?: boolean };
   mesice: { mesic: string; vyhry: number; objem: number; ucasti: number }[];
   segmenty: {

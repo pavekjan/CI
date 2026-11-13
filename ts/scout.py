@@ -65,7 +65,68 @@ def je_nedostupny(e):
     return any(x in t for x in ("timed out", "timeout", "connection refused", "connecterror", "max retries", "name or service"))
 
 
+PARALELNE_OD = 20 << 20  # soubory nad 20 MB se vytezuji ve vice procesech najednou
+
+
+def _pool(cfg):
+    """Vytezovani zaznamu (Extractor) je nejpomalejsi cast -> rozdelit na vic jader procesoru.
+    Poradi zaznamu se zachova (imap), takze vysledek je stejny jako pri zpracovani po jednom."""
+    n = int(cfg.get("procesu") or 0) or max(1, min(8, (os.cpu_count() or 2) - 1))
+    if n < 2:
+        return False
+    try:
+        import multiprocessing
+        pool = multiprocessing.get_context("spawn").Pool(n)
+        log(A, f"RVZ: zpracovavam na {n} jadrech procesoru najednou")
+        return pool
+    except Exception as e:  # napr. omezene prostredi -> po jednom
+        log(A, f"RVZ: paralelni zpracovani neni k dispozici ({str(e)[:80]}), pokracuji po jednom")
+        return False
+
+
 def scout_rvz(con, cfg, today=None):
+    stav = {"pool": None}
+    try:
+        return _scout_rvz(con, cfg, today, stav)
+    finally:
+        if stav["pool"]:
+            stav["pool"].terminate()
+
+
+def _zpracuj_soubor(con, cfg, path, ym, pool, obor, vse, nase, t0):
+    """Projde jeden mesicni soubor RVZ a ulozi zakazky. Vrati (zaznamu, ulozeno, novych, bez cisla)."""
+    y, m = ym
+    n = rel = new = bez_id = 0
+    t_log = t0
+    zaznamy = rvz.iter_records(path)
+    vytezene = (pool.imap(extractor.extract_rvz, zaznamy, chunksize=128) if pool
+                else map(extractor.extract_rvz, zaznamy))
+    for zak, vit, uc, pole in vytezene:
+        n += 1
+        if n % 200 == 0 and time.time() - t_log >= 5:
+            t_log = time.time()
+            log(A, f"  {m:02d}/{y}: zpracovano {n} zaznamu ({n / max(t_log - t0, 0.1):.0f}/s), ulozeno {rel}")
+            con.commit()
+        if not zak["id"]:
+            bez_id += 1
+            if bez_id == 1:  # diagnostika: jen nazvy poli (ne hodnoty), at je videt, co v zaznamu chybi
+                log(A, f"  {m:02d}/{y}: zaznam bez cisla zakazky, pole: {', '.join(pole or [])}")
+            continue
+        if vse:
+            duvod = next((o["nazev"] for k, o in cfg["obory"].items() if k != "vse" and extractor.relevance(zak, o)), "ostatní")
+            ours = False
+        else:
+            duvod = extractor.relevance(zak, obor)
+            ours = nase and any(v["dodavatel_ico"] == nase for v in vit + uc)
+        if not duvod and not ours:
+            continue
+        zak["relevance"] = duvod or "naše účast"
+        rel += 1
+        new += _save_zakazka(con, zak, vit, uc)
+    return n, rel, new, bez_id
+
+
+def _scout_rvz(con, cfg, today, stav):
     """Stahne mesicni open data RVZ za poslednich N mesicu, Extractor z nich vytahne zakazky
     a ulozi jen ty relevantni pro obor (CPV prefix nebo klicove slovo)."""
     if cfg.get("rvz_preskocit"):  # jen Registr smluv (GitHub Actions, stahnout_registr_3roky.bat)
@@ -123,32 +184,26 @@ def scout_rvz(con, cfg, today=None):
         if _uz_zpracovano(con, klic, path):
             log(A, f"RVZ {m:02d}/{y}: beze zmeny od minula -> preskakuji (uz je v databazi)")
             continue
-        n = rel = new = 0
-        t0 = t_log = time.time()
+        t0 = time.time()
         log(A, f"RVZ {m:02d}/{y}: zpracovavam soubor (prubeh se vypisuje kazdych par sekund)...")
-        for rec in rvz.iter_records(path):
-            n += 1
-            if n % 200 == 0 and time.time() - t_log >= 5:
-                t_log = time.time()
-                log(A, f"  {m:02d}/{y}: zpracovano {n} zaznamu ({n / max(t_log - t0, 0.1):.0f}/s), ulozeno {rel}")
-                con.commit()
-            zak, vit, uc = extractor.extract(rec, "rvz")
-            if not zak["id"]:
-                continue
-            if vse:
-                duvod = next((o["nazev"] for k, o in cfg["obory"].items() if k != "vse" and extractor.relevance(zak, o)), "ostatní")
-                ours = False
-            else:
-                duvod = extractor.relevance(zak, obor)
-                ours = nase and any(v["dodavatel_ico"] == nase for v in vit + uc)
-            if not duvod and not ours:
-                continue
-            zak["relevance"] = duvod or "naše účast"
-            rel += 1
-            new += _save_zakazka(con, zak, vit, uc)
+        if stav["pool"] is None and os.path.getsize(path) > PARALELNE_OD:
+            stav["pool"] = _pool(cfg)
+        try:
+            n, rel, new, bez_id = _zpracuj_soubor(con, cfg, path, (y, m), stav["pool"] or None, obor, vse, nase, t0)
+        except Exception as e:
+            if not stav["pool"]:
+                raise
+            # chyba v paralelnim zpracovani -> stejny mesic znovu po jednom (ukladani je idempotentni)
+            log(A, f"RVZ {m:02d}/{y}: paralelni zpracovani selhalo ({str(e)[:100]}), zpracuji znovu po jednom")
+            stav["pool"].terminate()
+            stav["pool"] = False
+            n, rel, new, bez_id = _zpracuj_soubor(con, cfg, path, (y, m), None, obor, vse, nase, time.time())
         con.commit()
         _oznac_zpracovano(con, klic, path)
-        log(A, f"RVZ {m:02d}/{y}: {n} zaznamu, {rel} relevantnich, {new} novych ({time.time() - t0:.0f} s)")
+        log(A, f"RVZ {m:02d}/{y}: {n} zaznamu, {rel} ulozeno, {new} novych zakazek"
+               + (f", {bez_id} bez cisla zakazky (preskoceno)" if bez_id else "")
+               + (f", {n - rel - bez_id} mimo obor" if not vse and n - rel - bez_id else "")
+               + f" ({time.time() - t0:.0f} s)")
         stats["zaznamu"] += n
         stats["relevantnich"] += rel
         stats["novych"] += new

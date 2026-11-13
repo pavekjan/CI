@@ -16,7 +16,7 @@ CPV_RE = re.compile(r"^\d{8}(-\d)?$")
 CPV_FULL = re.compile(r"^\d{8}-\d$")  # CPV s kontrolni cislici - jinde se tento tvar nevyskytuje
 SUPPLIER_KEY = ("dodavatel", "ucastn", "uchazec", "vitez", "vybran", "subjekt", "contractor", "bidder", "tenderer",
                 "smluvnistran", "konsorc", "spolecnik")
-EXTRACTOR_VERZE = 3  # zvyseni = znovu zpracovat uz stazene soubory
+EXTRACTOR_VERZE = 4  # zvyseni = znovu zpracovat uz stazene soubory
 # v3: dynamicke nakupni systemy (DNS 7, DNS 8, ...) a casti maji v open datech stejne evidencni cislo -> do ID se
 #     pridava otisk nazvu, jinak se prepisovaly a vitez jedne zakazky (napr. Alza v DNS 8) zmizel; ID uz nikdy
 #     neni kod NUTS ("CZ052"); vitezove z vice zaznamu teze zakazky se scitaji (casti zakazky)
@@ -336,6 +336,19 @@ def extract(rec, zdroj="rvz"):
             k0 = next(iter(vitezove))
             vitezove[k0] = to_float(cena)
 
+    ids = identifikatory(leaves, zid)
+    if zid is None:
+        # zakazky mimo Vestnik (zverejnene jen na profilu zadavatele / v NEN) nemaji evidencni cislo VVZ,
+        # ale maji Identifikator NIPEZ nebo systemove cislo NEN -> i ty jsou zakazky (drive se zahazovaly)
+        zid = ids["nipez_id"] or ids["nen_cislo"] or ids["vvz_cislo"]
+    if zid is None:
+        zid = _pick(leaves, lambda k: "identifikator" in k or "systemov" in k or ("cislo" in k and "vz" in k),
+                    ctx_test=_not_in(*AUTHORITY_CTX, *WINNER_CTX, *BIDDER_CTX, "dokument", "priloh", "formular"),
+                    value_test=lambda v: isinstance(v, (str, int)) and 5 <= len(str(v).strip()) <= 60
+                    and not RE_NE_ID.fullmatch(str(v).strip()))
+    if zid is None and nazev and zad_ico:
+        # posledni moznost: zakazka bez cisla, ale se zadavatelem a nazvem -> stabilni otisk z obou
+        zid = "p" + hashlib.sha1(f"{zad_ico}|{norm(nazev)}".encode("utf-8"), usedforsecurity=False).hexdigest()[:10]
     zak = {
         "id": id_zakazky(zdroj, zid, nazev),
         "zdroj": zdroj,
@@ -368,7 +381,7 @@ def extract(rec, zdroj="rvz"):
         if ("obrat" in kc_ or "turnover" in kc_) and _num(val) and (to_float(val) or 0) >= 10_000:
             min_obrat = max(min_obrat or 0, to_float(val))
     zak["kvalifikace"] = " | ".join(kval[:6])[:1200] or None
-    zak.update(identifikatory(leaves, zid))
+    zak.update(ids)
     zak["min_obrat"] = min_obrat
     vit = [{"dodavatel_ico": k[0] or None, "dodavatel_nazev": k[1] or None, "cena_bez_dph": v} for k, v in vitezove.items()]
     uc = [{"dodavatel_ico": k[0] or None, "dodavatel_nazev": k[1] or None, "nabidkova_cena": v} for k, v in ucastnici.items()]
@@ -400,3 +413,11 @@ def describe_keys(rec, max_lines=200):
         sv = repr(v)
         lines.append(f"{p:<70} {sv[:60]}")
     return lines
+
+
+def extract_rvz(rec):
+    """Pro paralelni zpracovani (multiprocessing): vytezi zaznam RVZ; u zaznamu bez cisla vrati i nazvy poli
+    (diagnostika do logu)."""
+    zak, vit, uc = extract(rec, "rvz")
+    pole = (list(rec)[:25] if isinstance(rec, dict) else [type(rec).__name__]) if not zak["id"] else None
+    return zak, vit, uc, pole

@@ -211,6 +211,11 @@ návštěvě znovu nastartuje, takže nová data má prakticky hned.
 
 Práce je rozdělená na dvě části, protože server se zakázkami (ISVZ) odpovídá jen počítačům v Česku:
 
+**Nejjednodušší: všechno najednou přes noc – `finalni_aktualizace.bat`.** Jedním spuštěním stáhne a zpracuje
+zakázky z ISVZ za 12 měsíců, potom Registr smluv za 3 roky a nahraje databázi pro online verzi. Na nic se
+neptá, trvá zhruba 3–6 hodin. Zakázky se zpracovávají na více jádrech procesoru najednou (asi 3–6× rychleji
+než dřív). Když se přeruší, spusťte znovu, hotové měsíce se přeskočí.
+
 **1. Registr smluv – automaticky každé ráno na GitHubu (Actions → Aktualizace dat).** Nic nemusíte mít
 zapnuté. Historie za 3 roky se doplňuje po částech (asi 8 měsíců za jeden běh), takže je kompletní zhruba
 za týden. Zakázky z ISVZ se na GitHubu vůbec nezkoušejí (server je odtud blokovaný).
@@ -241,6 +246,11 @@ dlouho** (stahují se desítky GB, počítejte s několika hodinami), další b�
 **Proč má firma v soutěžích (RVZ) málo výher:** v RVZ jsou hlavně větší soutěže. Malé zakázky a objednávky
 (typicky e-shopy jako Alza) tam nejsou, ale jsou v Registru smluv. Profil firmy proto ukazuje obojí zvlášť
 a u každého zdroje období. S tokenem Hlídače státu (`HLIDAC_TOKEN`, zdarma) ukáže i počet smluv za celou historii.
+
+**Proč má Hlídač státu vyšší čísla:** Hlídač počítá celou historii od roku 2016 (my zakázky za 12 měsíců
+a Registr za 3 roky) a navíc zakázky malého rozsahu z profilů zadavatelů. Od verze 15 se z RVZ ukládají i
+zakázky, které nemají číslo ve Věstníku (jen Identifikátor NIPEZ nebo číslo NEN); dřív se zahazovaly.
+S tokenem Hlídače (`HLIDAC_TOKEN`) ukáže profil firmy pro srovnání i Hlídačův počet smluv a zakázek.
 
 **Segment „neuvedeno“:** asi 70 % záznamů RVZ nemá vyplněné CPV. Aplikace segment odhadne podle názvu
 zakázky (model se učí ze zakázek, které CPV mají; přesnost kolem 93 %) a označí ho jako *odhad*. Zbytek

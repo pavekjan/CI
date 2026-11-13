@@ -219,25 +219,29 @@ _HLIDAC_CACHE = {}
 
 
 def hlidac_smlouvy(cfg, ico, online=True):
-    """Celkovy pocet smluv firmy v Registru smluv za celou historii podle Hlidace statu (token zdarma).
-    Odkaz funguje i bez tokenu. Vysledek se drzi 24 h v pameti."""
+    """Pro srovnani: kolik smluv (Registr smluv) a kolik verejnych zakazek (jako dodavatel) ma firma za celou
+    historii podle Hlidace statu (token zdarma). Hlidac pocita i zakazky z profilu zadavatelu a od roku 2016,
+    proto jsou jeho cisla vyssi. Odkazy funguji i bez tokenu. Vysledek se drzi 24 h v pameti."""
     url = f"https://www.hlidacstatu.cz/hledat?Q=ico%3A{ico}"
+    vz_url = f"https://www.hlidacstatu.cz/verejnezakazky/hledat?Q=icododavatel%3A{ico}"
+    out = {"url": url, "pocet": None, "zakazky_url": vz_url, "zakazky": None}
     token = cfg.get("hlidac_token")
     if not token or not online:
-        return {"url": url, "pocet": None}
+        return out
     hit = _HLIDAC_CACHE.get(ico)
     if hit and hit[0] > datetime.now() - timedelta(hours=24):
         return hit[1]
-    out = {"url": url, "pocet": None}
-    try:
-        r = http_get(cfg["zdroje"]["hlidac_base"] + "smlouvy/hledat", params={"dotaz": f"ico:{ico}", "strana": 1},
-                     headers={"Authorization": f"Token {token}"}, timeout=10, retries=1)
-        if r.status_code == 200:
-            d = r.json()
-            n = d.get("total", d.get("Total"))
-            out["pocet"] = int(n) if isinstance(n, (int, float)) else None
-    except Exception as e:  # doplnek: pri chybe profil funguje dal
-        log(A, f"Hlidac statu {ico}: {str(e)[:120]}")
+    for pole, cesta, dotaz in (("pocet", "smlouvy/hledat", f"ico:{ico}"),
+                               ("zakazky", "verejnezakazky/hledat", f"icododavatel:{ico}")):
+        try:
+            r = http_get(cfg["zdroje"]["hlidac_base"] + cesta, params={"dotaz": dotaz, "strana": 1},
+                         headers={"Authorization": f"Token {token}"}, timeout=10, retries=1)
+            if r.status_code == 200:
+                d = r.json()
+                n = d.get("total", d.get("Total"))
+                out[pole] = int(n) if isinstance(n, (int, float)) else None
+        except Exception as e:  # doplnek: pri chybe profil funguje dal
+            log(A, f"Hlidac statu {ico} ({cesta}): {str(e)[:120]}")
     if len(_HLIDAC_CACHE) > 2000:
         _HLIDAC_CACHE.clear()
     _HLIDAC_CACHE[ico] = (datetime.now(), out)

@@ -323,6 +323,11 @@ def run_update(rezim):
                 # jen Registr smluv: 36 mesicu souhrnu + 3 mesice detailu najednou (stahnout_registr_3roky.bat)
                 cfg.update({"rvz_preskocit": True, "smlouvy_mesice": 3, "smlouvy_souhrn_mesice": 36,
                             "ares_max_firem": 0, "mazat_stazene": True})
+            elif rezim == "finalni":
+                # vse najednou (finalni_aktualizace.bat): zakazky z ISVZ za 12 mesicu a pak Registr smluv za 3 roky;
+                # zpracovane soubory Registru se hned mazou (desitky GB)
+                cfg.update({"mesice": cfg.get("mesice", 12), "smlouvy_mesice": 3, "smlouvy_souhrn_mesice": 36,
+                            "ares_max_firem": 40, "mazat_stazene": True})
             elif rezim == "zakazky":
                 # jen zakazky z ISVZ (12 mesicu); Registr smluv doplnuje GitHub Actions
                 cfg.update({"mesice": cfg.get("mesice", 12), "smlouvy_mesice": 0, "smlouvy_souhrn_mesice": 0,
