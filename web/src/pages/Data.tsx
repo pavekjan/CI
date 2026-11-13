@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { adminHeslo, api, nastavAdminHeslo, type AiForm, type Beh, type Nastaveni, type Stav } from "../api";
+import { adminHeslo, api, nastavAdminHeslo, type AiForm, type AiLimity, type Beh, type Nastaveni, type Stav } from "../api";
 import { Card, Kpi } from "../components";
 import { datum, mesic, num } from "../format";
 
@@ -201,6 +201,7 @@ function AiCard({ nast, onSaved }: { nast: Nastaveni; onSaved: (n: Nastaveni) =>
   const [model, setModel] = useState(p.model);
   const [url, setUrl] = useState(p.url);
   const [ucet, setUcet] = useState(p.ucet);
+  const [limit, setLimit] = useState<string>(nast.limity?.ai_limit_nastaveny == null ? "" : String(nast.limity.ai_limit_nastaveny));
   const [modely, setModely] = useState<string[]>([]);
   const [zprava, setZprava] = useState<{ ok: boolean; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
@@ -229,7 +230,7 @@ function AiCard({ nast, onSaved }: { nast: Nastaveni; onSaved: (n: Nastaveni) =>
     setZprava(r.ok ? { ok: true, text: `Funguje ✓ ${r.poskytovatel} (${r.model}) odpověděl: „${r.odpoved}“` } : { ok: false, text: r.chyba || "Nefunguje." });
   });
   const ulozit = () => akce(async () => {
-    const n = await api.ulozNastaveni(form());
+    const n = await api.ulozNastaveni({ ...form(), ai_denni_limit: limit.trim() === "" ? null : limit.trim() });
     onSaved(n); setKlic("");
     setZprava({ ok: true, text: "Uloženo. Onboarding teď používá " + (n.ai.pripraveno ? `${p.nazev} (${n.ai.model}).` : "pravidla – chybí klíč.") });
   });
@@ -240,8 +241,9 @@ function AiCard({ nast, onSaved }: { nast: Nastaveni; onSaved: (n: Nastaveni) =>
       <div className="row" style={{ marginBottom: 8 }}>
         {ai.pripraveno ? <span className="badge good">Aktivní: {ai.poskytovatele.find((x) => x.id === ai.poskytovatel)?.nazev} · {ai.model}</span>
           : <span className="badge neutral">AI není nastavená – používají se pravidla</span>}
-        {nast.limity && <span className="secondary small">dnes {nast.limity.ai_dnes} / {nast.limity.ai_max} volání AI</span>}
+        {nast.limity && <span className="secondary small">dnes {nast.limity.ai_dnes} {nast.limity.ai_max == null ? "volání AI (bez denního limitu)" : `/ ${nast.limity.ai_max} volání AI`}</span>}
       </div>
+      {ai.pripraveno && !zamceno && <LimityAI />}
       {zamceno && <div className="callout" style={{ marginBottom: 10 }}>Na online verzi mění AI jen správce (přihlášení výše). Návštěvníci mají onboarding na pravidla, nic se neplatí.</div>}
       <label className="small secondary" htmlFor="ai-prov">Poskytovatel</label>
       <select id="ai-prov" className="field" value={prov} onChange={(e) => zmenProv(e.target.value)} disabled={zamceno}>
@@ -297,6 +299,14 @@ function AiCard({ nast, onSaved }: { nast: Nastaveni; onSaved: (n: Nastaveni) =>
       </label>
       <input id="ai-model" className="field" list="ai-modely" value={model} onChange={(e) => setModel(e.target.value)} placeholder="název modelu" disabled={zamceno} />
       <datalist id="ai-modely">{modely.map((m) => <option key={m} value={m} />)}</datalist>
+      <label className="small secondary" htmlFor="ai-limit" style={{ marginTop: 10, display: "block" }}>
+        Denní limit volání AI <span className="muted">(prázdné = výchozí: {p.zdarma ? "u bezplatných bez limitu" : "30 u placených"}; 0 = bez limitu)</span>
+      </label>
+      <input id="ai-limit" className="field" style={{ maxWidth: 160 }} inputMode="numeric" value={limit}
+        onChange={(e) => setLimit(e.target.value.replace(/[^0-9]/g, ""))} placeholder={p.zdarma ? "bez limitu" : "30"}
+        disabled={zamceno || !!nast.limity?.ai_limit_env} />
+      {nast.limity?.ai_limit_env && <div className="small muted">Limit je nastavený na serveru proměnnou TS_AI_DENNI_LIMIT.</div>}
+      <div className="small muted" style={{ marginTop: 4 }}>Když poskytovatel zdarma vyčerpá svůj vlastní limit (např. OpenRouter free 50 dotazů/den), onboarding se nezastaví – přepne se na pravidla a ukáže proč.</div>
       <div className="row" style={{ marginTop: 12 }}>
         <button className="btn primary" onClick={ulozit} disabled={busy || zamceno}>Uložit a používat</button>
         <button className="btn" onClick={nacistModely} disabled={busy || zamceno}>Načíst modely</button>
@@ -305,5 +315,29 @@ function AiCard({ nast, onSaved }: { nast: Nastaveni; onSaved: (n: Nastaveni) =>
       </div>
       {zprava && <div className={`badge ${zprava.ok ? "good" : "bad"}`} style={{ marginTop: 10, whiteSpace: "normal" }}>{zprava.text}</div>}
     </Card>
+  );
+}
+
+function LimityAI() {
+  const [l, setL] = useState<AiLimity | null>(null);
+  const [busy, setBusy] = useState(false);
+  const nacist = () => { setBusy(true); api.aiLimity().then(setL).catch(() => setL(null)).finally(() => setBusy(false)); };
+  useEffect(nacist, []);
+  if (!l) return <div className="small muted" style={{ marginBottom: 8 }}>{busy ? "Zjišťuji limity poskytovatele…" : ""}</div>;
+  if (!l.ok) return null;
+  const d = l.limity ?? {};
+  const casti = [d.rpm && `${d.rpm}/min`, d.rph && `${d.rph}/hod`, d.rpd && `${d.rpd}/den`, d.mesicne && `${d.mesicne}/měsíc`,
+    d.tpm && `${num(d.tpm)} tokenů/min`, d.tpd && `${num(d.tpd)} tokenů/den`, d.soubezne && `${d.soubezne} souběžný dotaz`].filter(Boolean);
+  return (
+    <div className="callout small" style={{ marginBottom: 10 }}>
+      <div><b>Limity poskytovatele:</b> {casti.join(", ") || "—"}{d.pozn ? ` (${d.pozn})` : ""}
+        {d.zdroj && <> · <a href={d.zdroj} target="_blank" rel="noreferrer">zdroj</a></>}</div>
+      {l.zivy?.denni_zbyva != null && <div><b>Zbývá dnes (živě z OpenRouteru):</b> {l.zivy.denni_zbyva} z {l.zivy.denni_limit} dotazů zdarma</div>}
+      {l.zivy?.kredit_zbyva != null && <div><b>Zbývající kredit klíče:</b> {l.zivy.kredit_zbyva}</div>}
+      {l.hlavicky?.zbyva_dotazu != null && <div><b>Poskytovatel hlásí:</b> zbývá {l.hlavicky.zbyva_dotazu}{l.hlavicky.limit_dotazu ? ` z ${l.hlavicky.limit_dotazu}` : ""} dotazů{l.hlavicky.zbyva_tokenu != null ? `, ${num(l.hlavicky.zbyva_tokenu)} tokenů` : ""}</div>}
+      <div>Tato aplikace dnes: {l.dnes ?? 0} dotazů (za poslední minutu {l.za_minutu ?? 0}){l.aplikace?.max ? ` · vlastní strop ${l.aplikace.max}/den` : " · vlastní strop: bez limitu"}</div>
+      {l.pauza && <div className="warn-text"><b>AI je teď pozastavená:</b> {l.pauza.duvod}, znovu za {l.pauza.zbyva}. Onboarding mezitím jede na pravidla.</div>}
+      <button className="btn" style={{ marginTop: 6 }} onClick={nacist} disabled={busy}>Obnovit</button>
+    </div>
   );
 }

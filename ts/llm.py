@@ -10,9 +10,11 @@ Bezpecnost: klice jen z promennych prostredi / config.local.json, nikdy do logu 
 vystup modelu je nedueryhodny a vzdy se validuje (onboarding._ocisti_*).
 """
 import json
+import time
 import os
 import re
 
+from . import ai_limity
 from .util import log, session
 
 A = "LLM"
@@ -125,6 +127,13 @@ def dostupne():
         return False
 
 
+def je_zdarma(cfg):
+    """Bezplatny poskytovatel, nebo OpenRouter s modelem zdarma (":free", openrouter/free)."""
+    prov = poskytovatel(cfg)
+    model = (cfg.get(f"{prov}_model") or POSKYTOVATELE[prov]["model"] or "").lower()
+    return bool(POSKYTOVATELE[prov].get("zdarma")) or model.endswith(":free") or model == "openrouter/free"
+
+
 def poskytovatel(cfg):
     p = cfg.get("llm_poskytovatel") or "anthropic"
     return p if p in POSKYTOVATELE else "anthropic"
@@ -203,7 +212,7 @@ def _hlavicky(n):
 def _http_chyba(r):
     kod = r.status_code
     zprava = {401: "neplatný API klíč", 403: "klíč nemá oprávnění (nebo chybí kredit)", 404: "model nebo adresa API neexistuje",
-              429: "překročen limit API nebo došel kredit, zkuste později"}.get(kod, f"chyba API (HTTP {kod})")
+              402: "došel kredit nebo je vyčerpaný limit klíče", 429: "překročen limit poskytovatele"}.get(kod, f"chyba API (HTTP {kod})")
     try:  # kratka hlaska od poskytovatele (bez hlavicek a klicu)
         detail = r.json().get("error")
         detail = detail.get("message") if isinstance(detail, dict) else detail
@@ -222,16 +231,25 @@ def _openai(n, system, user, schema):
     r = None
     for f in formaty:  # ne kazdy model umi JSON schema -> zkusime jednodussi rezim
         telo = dict(zaklad, **({"response_format": f} if f else {}))
-        try:
-            r = session().post(url, headers=_hlavicky(n), json=telo, timeout=180, allow_redirects=False)
-        except Exception as e:
-            raise LLMChyba(f"nelze se připojit k {n['nazev']} ({type(e).__name__})")
+        for pokus in range(4):  # 429/402/5xx: kratke cekani s exponencialnim odstupem, jinak pravidla
+            try:
+                r = session().post(url, headers=_hlavicky(n), json=telo, timeout=180, allow_redirects=False)
+            except Exception as e:
+                raise LLMChyba(f"nelze se připojit k {n['nazev']} ({type(e).__name__})")
+            if r.status_code not in (402, 429, 500, 502, 503, 529):
+                break
+            cekat = ai_limity.po_chybe(n, r.status_code, r.headers, r.text[:2000], pokus)
+            if cekat is None:
+                break
+            log(A, f"{n['nazev']}: HTTP {r.status_code}, zkusim znovu za {cekat:.0f} s")
+            time.sleep(cekat)
         if r.status_code in (400, 422) and f is not None:
             log(A, f"{n['nazev']}: response_format {f['type']} nepodporovan, zkousim jednodussi")
             continue
         break
     if r.status_code != 200:
         raise _http_chyba(r)
+    ai_limity.po_odpovedi(n, r.headers)
     d = r.json()
     volba = (d.get("choices") or [{}])[0]
     msg = volba.get("message") or {}
@@ -249,6 +267,11 @@ def _openai(n, system, user, schema):
 
 def zavolej(n, user_payload, schema, effort="medium", system=None):
     """n = nastaveni(cfg). Vrati (dict, info). Vyhodi vyjimku, kdyz se volani nepovede (volajici pak pouzije zaloznik)."""
+    if n["typ"] == "openai":
+        ai_limity.zivy_stav(n, session().get)  # OpenRouter: kolik dotazu zdarma dnes zbyva (60 s cache)
+    proc_ne = ai_limity.pred_volanim(n)
+    if proc_ne:
+        raise LLMChyba(proc_ne)
     system = system or system_prompt()
     user = json.dumps(user_payload, ensure_ascii=False)
     if n["typ"] == "anthropic":

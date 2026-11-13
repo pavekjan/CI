@@ -7,6 +7,8 @@
                                          # stahne aktualni online databazi (vetev "data" na GitHubu) do
                                          # data/online.db a doplni do ni jen zakazky z ISVZ (ISVZ je dostupne
                                          # jen z ceskeho pocitace, Registr smluv doplnuje GitHub Actions)
+    python aktualizovat_db.py --online-db auto --jen-registr
+                                         # jen Registr smluv za 3 roky najednou (stahnout_registr_3roky.bat)
     python aktualizovat_db.py --ai 400   # navic: zbytek zakazek bez segmentu zkusi rozradit AI (max. 400 na beh)
 
 Uz zpracovane mesice se preskakuji a stazene soubory se berou z cache (data/cache), starsi data v databazi zustavaji.
@@ -39,9 +41,21 @@ def url_online_db():
     return f"https://raw.githubusercontent.com/{m.group(1)}/{m.group(2)}/data/tenderscope.db.gz"
 
 
+def _pokrok(path):
+    """Kolik mesicu Registru smluv a zakazek uz databaze obsahuje (podle tabulky soubory)."""
+    import sqlite3
+    try:
+        con = sqlite3.connect(path)
+        n = con.execute("SELECT COUNT(*) FROM soubory WHERE klic LIKE 'rs3:%' OR klic LIKE 'rvz:%'").fetchone()[0]
+        con.close()
+        return n
+    except sqlite3.Error:
+        return -1
+
+
 def main():
     rezim = ("rychle" if "--rychle" in sys.argv else "plny" if "--plny" in sys.argv
-             else "zakazky" if "--jen-zakazky" in sys.argv else "denni")
+             else "zakazky" if "--jen-zakazky" in sys.argv else "registr" if "--jen-registr" in sys.argv else "denni")
     server.STATE["cfg"] = load_config()
     if "--online-db" in sys.argv:
         # Pracuje nad aktualni online databazi (co do ni nahral GitHub Actions), ne nad data/tenderscope.db,
@@ -55,13 +69,23 @@ def main():
             return 1
         server.STATE["db"] = os.path.join(ROOT, "data", "online.db")
         os.makedirs(os.path.dirname(server.STATE["db"]), exist_ok=True)
-        if not server.stahni_databazi(url, server.STATE["db"]) and not os.path.exists(server.STATE["db"]):
+        cil = server.STATE["db"]
+        novy = cil + ".novy"
+        if server.stahni_databazi(url, novy):
+            if os.path.exists(cil) and _pokrok(cil) > _pokrok(novy):
+                # predchozi beh na tomto pocitaci se nedokoncil (nebo se nenahral) -> pokracovat v nem
+                print("Mistni data/online.db obsahuje vic zpracovanych mesicu nez online verze -> pokracuji v ni.")
+                os.remove(novy)
+            else:
+                os.replace(novy, cil)
+        if not os.path.exists(cil):
             lokalni = os.path.join(ROOT, "data", "tenderscope.db")
             if os.path.exists(lokalni):  # prvni beh bez vetve data: zacit z mistni databaze
                 import shutil
                 shutil.copyfile(lokalni, server.STATE["db"])
     if "--ci" in sys.argv:  # GitHub Actions: malo mista na disku a casovy limit -> historie po castech
-        server.STATE["cfg"].update({"mazat_stazene": True, "smlouvy_max_novych": 8})
+        # ISVZ je z GitHubu blokovane -> zakazky jen z vaseho pocitace (aktualizovat_online.bat)
+        server.STATE["cfg"].update({"mazat_stazene": True, "smlouvy_max_novych": 8, "rvz_preskocit": True})
     if "--z-url" in sys.argv and not os.path.exists(server.STATE["db"]):
         # GitHub Actions: zacit z posledni nahrane databaze -> zpracovavaji se jen nove mesice
         os.makedirs(os.path.dirname(server.STATE["db"]), exist_ok=True)
@@ -74,7 +98,7 @@ def main():
     n = con.execute("SELECT COUNT(*) FROM zakazky").fetchone()[0]
     con.close()
     print(f"Zakazek v databazi: {n}")
-    if server.JOB["chyba"] or n == 0:
+    if server.JOB["chyba"] or (n == 0 and rezim != "registr"):
         print("Aktualizace se nepovedla:", server.JOB["chyba"] or "zadne zakazky")
         return 1
     return 0

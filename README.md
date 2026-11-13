@@ -92,6 +92,24 @@ Dotazník hodnotí:
 | Splníme kvalifikaci? | **odpovídáte vy** (ano / ne / nevím) |
 | Máme volnou kapacitu? | **odpovídáte vy** (ano / ne / nevím) |
 
+**Jak se počítá skóre.** Každá otázka má skóre 0–100 a váhu (předmět 30, lokalita 20, velikost 15,
+kvalifikace 15, čas 10, zadavatel 10, konkurence 10). Skóre se mění plynule, ne skokem: vzdálenost podle
+křivky kolem vašeho limitu km, velikost podle toho, kolikrát je zakázka mimo váš rozsah, čas podle počtu
+dní vůči době přípravy, zadavatel podle počtu dosavadních výher a smluv u něj, konkurence podle průměrného
+počtu nabídek v oboru. **Základ** je vážený průměr. Vylučující důvody (moc daleko, moc velká, málo času,
+blacklist, vyloučené slovo, nedosažitelný obrat) základ **násobí srážkou** podle toho, jak vážné jsou,
+takže i nevhodné zakázky mají různé skóre a jsou seřazené. U každé zakázky je rozpad: kolik bodů přinesla
+která otázka a jaké srážky se použily.
+
+**Odkazy a čísla zakázky.** U každé zakázky ve zpravodaji jsou odkazy na NEN (když má systémové číslo
+N006/…), na Věstník veřejných zakázek, na hledání na Hlídači státu a na zadavatele. Ukáže se i
+**Identifikátor NIPEZ** (RVZ…), systémové číslo NEN a evidenční číslo ve Věstníku s tlačítkem kopírovat.
+Identifikátor NIPEZ a číslo NEN se plní při stahování zakázek (`aktualizovat_online.bat`), pokud je
+open data uvádějí; evidenční číslo ve Věstníku mají zakázky hned.
+
+**CPV kódy firmy se vyplní automaticky** z její historie: vyhrané zakázky (podle počtu a objemu),
+podané nabídky a smlouvy z Registru smluv. Pod polem je napsáno, z čeho se kódy vzaly.
+
 ### Trh
 
 Přehled celého trhu nebo vybraného oboru: kolik zakázek se zadává v čase, kdo vyhrává nejvíc, ve kterých krajích.
@@ -195,7 +213,13 @@ Práce je rozdělená na dvě části, protože server se zakázkami (ISVZ) odpo
 
 **1. Registr smluv – automaticky každé ráno na GitHubu (Actions → Aktualizace dat).** Nic nemusíte mít
 zapnuté. Historie za 3 roky se doplňuje po částech (asi 8 měsíců za jeden běh), takže je kompletní zhruba
-za týden. Zakázky z ISVZ tady skončí hláškou „neodpovídá“ a přeskočí se – to je v pořádku.
+za týden. Zakázky z ISVZ se na GitHubu vůbec nezkoušejí (server je odtud blokovaný).
+
+**Rychleji: celý Registr smluv za 3 roky najednou z vašeho počítače** – dvakrát klikněte na
+**`stahnout_registr_3roky.bat`**. Trvá 2–4 hodiny podle rychlosti internetu (stáhne se zhruba 25–40 GB,
+každý zpracovaný soubor se hned smaže, na disku stačí pár GB volného místa). Když se přeruší, spusťte ho
+znovu, hotové měsíce se přeskočí. Databáze pro online verzi pak má zhruba 60–80 MB (zabaleno), na Render
+i na GitHub se vejde.
 
 **2. Zakázky (RVZ) – z vašeho počítače, stačí jednou za měsíc** (nový měsíc ISVZ zveřejní kolem
 10. dne): dvakrát klikněte na **`aktualizovat_online.bat`**. Stáhne aktuální online databázi z větve
@@ -324,7 +348,15 @@ jen přejde na pravidla.
 5. Klikněte **Uložit a používat**. V onboardingu pak u profilu uvidíte např. „Agent: Google Gemini (…)“.
 
 Když AI selže (špatný klíč, došel kredit, výpadek), onboarding automaticky použije **pravidla**
-a napíše proč. Odpověď AI se vždy kontroluje, takže nesmysl z modelu se do profilu nedostane.
+a napíše proč.
+
+**Limity.** U AI je vidět, jaké limity má vybraný poskytovatel podle své dokumentace (odkaz „zdroj“),
+kolik dotazů aplikace dnes poslala a u OpenRouteru i kolik dotazů zdarma dnes zbývá (živě z jeho API).
+Aplikace limity poskytovatele sama hlídá: při chybě 429 (moc dotazů) krátce počká a zkusí to znovu,
+při vyčerpaném denním limitu nebo chybě 402 (došel kredit) AI dočasně vynechá a onboarding jede na pravidla.
+Vlastní denní strop aplikace nastavíte v poli **Denní limit volání AI**: prázdné = výchozí (u bezplatných
+AI bez limitu, u placených 30 jako ochrana peněženky), 0 = bez limitu. Na serveru ho jde přepsat proměnnou
+`TS_AI_DENNI_LIMIT`. Odpověď AI se vždy kontroluje, takže nesmysl z modelu se do profilu nedostane.
 
 **Soukromí:** do AI se posílají údaje o firmě (ARES, zakázky, text z webu firmy) a vaše odpovědi z dotazníku.
 **Bezplatné tarify mohou dotazy ukládat nebo je použít ke zlepšování modelů**, proto tam nepište nic důvěrného
@@ -465,7 +497,8 @@ python server.py --demo       # umělá data bez internetu
 | `HLIDAC_TOKEN`, `EXA_API_KEY` | nepovinné klíče |
 | `TS_AUTO_AKTUALIZACE` | `rychle` (výchozí v Dockeru): při prázdné databázi stáhne data hned po startu |
 | `TS_DEMO` | `1` = umělá data |
-| `TS_LIMIT_LLM_DEN`, `TS_LIMIT_EXA_DEN` | denní strop volání placených API (výchozí 30 a 40) |
+| `TS_AI_DENNI_LIMIT` | denní strop volání AI pro celou aplikaci; prázdné = placená AI 30, bezplatná bez limitu; 0 = bez limitu. Bez proměnné ho nastaví správce na stránce Data. |
+| `TS_LIMIT_EXA_DEN` | denní strop volání Exa (výchozí 40) |
 | `TS_LIMIT_ZA_MINUTU`, `TS_LIMIT_DRAHE_ZA_MINUTU` | rate limiting na IP adresu (výchozí 120 a 10) |
 | `TS_POVOLENE_HOSTY` | nepovinné: seznam domén, na kterých smí aplikace odpovídat |
 | `PORT`, `TS_HOST` | port a adresa serveru (v Dockeru `0.0.0.0`) |

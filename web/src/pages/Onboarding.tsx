@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import {
-  api, type AgentInfo, type Faze1, type Kriterium, type Odpoved, type PolozkaZpravodaje, type Profil2, type Recon, type Zpravodaj,
+  api, type AgentInfo, type Faze1, type Kriterium, type Odpoved, type PolozkaZpravodaje, type Profil2, type Recon, type Srazka, type Zpravodaj,
 } from "../api";
 import { Card, go, Kpi, Loading } from "../components";
 import { datum, kc, num } from "../format";
@@ -237,6 +237,7 @@ function ProfilCard({ profil, agent, onSave, disabled }: { profil: Profil2; agen
           <div>
             <label className="lbl">Hlavní CPV kódy</label>
             <input className="field mono" value={seznamText(p.cpv_codes.main)} onChange={(e) => set({ cpv_codes: { ...p.cpv_codes, main: zText(e.target.value) } })} />
+            {p.cpv_zdroj && <div className="small muted" style={{ marginTop: 2 }}>{p.cpv_zdroj}</div>}
             <label className="lbl">Vedlejší CPV kódy</label>
             <input className="field mono" value={seznamText(p.cpv_codes.secondary)} onChange={(e) => set({ cpv_codes: { ...p.cpv_codes, secondary: zText(e.target.value) } })} />
             <label className="lbl">Klíčová slova</label>
@@ -303,22 +304,34 @@ const RUCNI = [
   { klic: "kapacita", otazka: "Máme v termínu plnění volnou kapacitu?", vaha: 10 },
 ];
 
+// stejny model jako ts/onboarding.py skore_z_kriterii: vazeny prumer (zaklad) x srazky za vylucujici duvody
+function skoreZKriterii(kr: Kriterium[], srazky: Srazka[]) {
+  const pl = kr.filter((c) => c.skore !== null);
+  const sv = pl.reduce((a, c) => a + c.vaha, 0);
+  for (const c of kr) c.body = c.skore !== null && sv ? Math.round(((c.skore as number) * c.vaha / sv) * 10) / 10 : null;
+  const zaklad = sv ? pl.reduce((a, c) => a + (c.skore as number) * c.vaha, 0) / sv : 0;
+  const faktor = srazky.reduce((f, s) => f * (1 - s.zavaznost), 1);
+  const skore = Math.round(zaklad * faktor);
+  const ko = srazky.filter((s) => s.zavaznost >= 0.5).map((s) => s.duvod);
+  const verdikt = ko.length ? "nevhodné" : skore >= 70 ? "doporučeno" : skore >= 50 ? "zvážit" : "spíš ne";
+  return { skore, zaklad: Math.round(zaklad), srazky, verdikt, ko, kriteria: kr };
+}
+
 function prepocet(p: PolozkaZpravodaje, r: Record<string, "ano" | "ne" | "nevim"> | undefined) {
   const kr: Kriterium[] = p.kriteria.filter((c) => c.klic !== "kvalifikace").map((c) => ({ ...c }));
-  const ko = [...p.ko];
+  const srazky: Srazka[] = (p.srazky ?? []).filter((s) => !(s.klic === "kvalifikace" && r?.kvalifikace));
   for (const q of RUCNI) {
     const v = r?.[q.klic];
     const auto = p.kriteria.find((c) => c.klic === q.klic);
     if (v === "ano") kr.push({ klic: q.klic, otazka: q.otazka, odpoved: "ano (vaše odpověď)", skore: 100, vaha: q.vaha, rucne: true });
-    else if (v === "ne") { kr.push({ klic: q.klic, otazka: q.otazka, odpoved: "ne (vaše odpověď)", skore: 0, vaha: q.vaha, rucne: true }); ko.push(q.otazka.replace("?", "") + ": ne"); }
+    else if (v === "ne") {
+      kr.push({ klic: q.klic, otazka: q.otazka, odpoved: "ne (vaše odpověď)", skore: 0, vaha: q.vaha, rucne: true });
+      srazky.push({ duvod: q.otazka.replace("?", "") + ": ne", zavaznost: 0.6, klic: q.klic });
+    }
     else if (auto) kr.push({ ...auto, rucne: true });
     else kr.push({ klic: q.klic, otazka: q.otazka, odpoved: "nevyplněno", skore: null, vaha: q.vaha, rucne: true });
   }
-  const pl = kr.filter((c) => c.skore !== null);
-  let s = pl.length ? Math.round(pl.reduce((a, c) => a + (c.skore as number) * c.vaha, 0) / pl.reduce((a, c) => a + c.vaha, 0)) : 0;
-  if (ko.length) s = Math.min(s, 25);
-  const verdikt = ko.length ? "nevhodné" : s >= 70 ? "doporučeno" : s >= 50 ? "zvážit" : "spíš ne";
-  return { skore: s, verdikt, ko, kriteria: kr };
+  return skoreZKriterii(kr, srazky);
 }
 
 const VCLASS: Record<string, string> = { "doporučeno": "good", "zvážit": "warn", "spíš ne": "neutral", "nevhodné": "bad" };
@@ -358,10 +371,11 @@ function ZpravodajCard({ z, profil }: { z: Zpravodaj; profil: Profil2 }) {
             </button>
             {open === p.id && (
               <div className="zp-body">
+                <Identifikatory p={p} />
                 {v.ko.length > 0 && <div className="callout" style={{ marginBottom: 10 }}>Vylučující důvody: {v.ko.join(" · ")}</div>}
                 <div className="table-wrap">
                   <table>
-                    <thead><tr><th>Otázka</th><th>Odpověď</th><th style={{ textAlign: "right" }}>Váha</th><th style={{ textAlign: "right" }}>Skóre</th></tr></thead>
+                    <thead><tr><th>Otázka</th><th>Odpověď</th><th style={{ textAlign: "right" }}>Váha</th><th style={{ textAlign: "right" }}>Skóre</th><th style={{ textAlign: "right" }} title="Kolik bodů z celkových 100 přinesla otázka (skóre × váha / součet vah)">Body</th></tr></thead>
                     <tbody>
                       {v.kriteria.map((c) => (
                         <tr key={c.klic}>
@@ -381,14 +395,24 @@ function ZpravodajCard({ z, profil }: { z: Zpravodaj; profil: Profil2 }) {
                           </td>
                           <td className="num">{c.vaha}</td>
                           <td className="num">{c.skore ?? "–"}</td>
+                          <td className="num">{c.body ?? "–"}</td>
                         </tr>
                       ))}
                     </tbody>
+                    <tfoot>
+                      <tr><td colSpan={4}><b>Základ</b> <span className="muted small">(vážený průměr otázek s odpovědí)</span></td><td className="num"><b>{v.zaklad}</b></td></tr>
+                      {v.srazky.map((s, i) => (
+                        <tr key={i}><td colSpan={4}>Srážka: {s.duvod}</td><td className="num">× {(1 - s.zavaznost).toFixed(2)}</td></tr>
+                      ))}
+                      <tr><td colSpan={4}><b>Celkové skóre</b></td><td className="num"><b>{v.skore}</b></td></tr>
+                    </tfoot>
                   </table>
                 </div>
                 <div className="row small" style={{ marginTop: 8 }}>
                   <span className="muted">{p.segment}</span>
-                  {p.url && <a href={p.url} target="_blank" rel="noreferrer" title="Profil zadavatele / NEN – tam je zadávací dokumentace s kvalifikačními podmínkami">Detail a zadávací dokumentace ↗</a>}
+                  {(p.odkazy ?? (p.url ? [{ nazev: "Detail zakázky", url: p.url }] : [])).map((o) => (
+                    <a key={o.url} href={o.url} target="_blank" rel="noreferrer">{o.nazev} ↗</a>
+                  ))}
                   {p.zadavatel_ico && <a href={`#/trh`} onClick={(e) => { e.preventDefault(); go(`/trh/${encodeURIComponent(p.segment)}`); }}>Trh v segmentu →</a>}
                 </div>
               </div>
@@ -397,5 +421,24 @@ function ZpravodajCard({ z, profil }: { z: Zpravodaj; profil: Profil2 }) {
         ))}
       </div>
     </Card>
+  );
+}
+
+function Identifikatory({ p }: { p: PolozkaZpravodaje }) {
+  const radky: [string, string | null | undefined, string][] = [
+    ["Identifikátor NIPEZ", p.nipez_id, "číslo zakázky v Registru veřejných zakázek – zadejte ho do vyhledávání na NEN nebo Hlídači státu"],
+    ["Systémové číslo NEN", p.nen_cislo, "číslo zakázky v Národním elektronickém nástroji"],
+    ["Ev. číslo ve Věstníku", p.vvz_cislo, "evidenční číslo zakázky ve Věstníku veřejných zakázek"],
+  ];
+  const jsou = radky.filter((r) => r[1]);
+  if (!jsou.length) return null;
+  return (
+    <div className="row small" style={{ gap: 14, marginBottom: 10, flexWrap: "wrap" }}>
+      {jsou.map(([n, v, t]) => (
+        <span key={n} title={t}><span className="muted">{n}:</span> <b className="mono">{v}</b>{" "}
+          <button className="chip btnchip" onClick={() => navigator.clipboard?.writeText(v as string)} title="Zkopírovat">kopírovat</button>
+        </span>
+      ))}
+    </div>
   );
 }

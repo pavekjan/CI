@@ -6,6 +6,7 @@ Extractor nepouziva pevne cesty, ale hleda klice podle vyznamu (normalizovany na
 nazvy nadrazenych objektu). Prikaz `python tenderscope.py inspect` vypise skutecne klice,
 aby slo pravidla pripadne doladit v KEY_RULES nize.
 """
+import hashlib
 import re
 from functools import lru_cache
 
@@ -15,7 +16,10 @@ CPV_RE = re.compile(r"^\d{8}(-\d)?$")
 CPV_FULL = re.compile(r"^\d{8}-\d$")  # CPV s kontrolni cislici - jinde se tento tvar nevyskytuje
 SUPPLIER_KEY = ("dodavatel", "ucastn", "uchazec", "vitez", "vybran", "subjekt", "contractor", "bidder", "tenderer",
                 "smluvnistran", "konsorc", "spolecnik")
-EXTRACTOR_VERZE = 2  # zvyseni = znovu zpracovat uz stazene soubory
+EXTRACTOR_VERZE = 3  # zvyseni = znovu zpracovat uz stazene soubory
+# v3: dynamicke nakupni systemy (DNS 7, DNS 8, ...) a casti maji v open datech stejne evidencni cislo -> do ID se
+#     pridava otisk nazvu, jinak se prepisovaly a vitez jedne zakazky (napr. Alza v DNS 8) zmizel; ID uz nikdy
+#     neni kod NUTS ("CZ052"); vitezove z vice zaznamu teze zakazky se scitaji (casti zakazky)
 
 # kontext (nazvy nadrazenych klicu), ve kterem hledame dodavatele / ucastniky
 WINNER_CTX = ("dodavatel", "vitez", "vybran", "smluvnistrana", "uzavrenasmlouva", "smlouv", "contractor", "winner")
@@ -151,6 +155,46 @@ def _truthy(v):
     return v is True or str(v).strip().lower() in ("true", "1", "ano", "yes")
 
 
+RE_NE_ID = re.compile(r"[A-Z]{2}\d{1,3}|\d{8}(-\d)?")  # kod NUTS nebo CPV neni identifikator zakazky
+RE_NIPEZ = re.compile(r"\bRVZ\d{8,12}\b")
+RE_NEN = re.compile(r"\bN\d{3}/\d{2}/V\d{8}\b")
+RE_VVZ = re.compile(r"\bZ\d{4}-\d{6}\b")
+
+
+def id_zakazky(zdroj, zid, nazev):
+    """Jedno evidencni cislo muze patrit vic zakazkam (zakazky v dynamickem nakupnim systemu, opakovane vyzvy),
+    proto se k nemu pridava kratky otisk nazvu. Zaznamy teze zakazky (zahajeni, vysledek) maji stejny nazev."""
+    if zid is None:
+        return None
+    nz = norm(nazev or "")
+    if not nz:
+        return f"{zdroj}:{zid}"
+    return f"{zdroj}:{zid}:{hashlib.sha1(nz.encode('utf-8'), usedforsecurity=False).hexdigest()[:6]}"
+
+
+def identifikatory(leaves, zid=None):
+    """Cisla, podle kterych jde zakazku najit na internetu: Identifikator NIPEZ (RVZ...), systemove cislo NEN
+    (N006/26/V...), evidencni cislo ve Vestniku (Z2026-...) a adresa profilu zadavatele. Hleda se podle tvaru
+    hodnoty, ne podle nazvu pole, protoze se nazvy poli v open datech meni."""
+    out = {"nipez_id": None, "nen_cislo": None, "vvz_cislo": None, "profil_url": None}
+    if zid is not None and RE_VVZ.fullmatch(str(zid)):
+        out["vvz_cislo"] = str(zid)
+    for _, k, ctx, val in leaves:
+        if not isinstance(val, str) or len(val) > 300:
+            continue
+        kc_ = k + "/" + ctx
+        if any(w in kc_ for w in ("dodavatel", "ucastnik", "dokument", "priloh", "navazuj", "puvodn", "predchoz")):
+            continue
+        for pole, rx in (("nipez_id", RE_NIPEZ), ("nen_cislo", RE_NEN), ("vvz_cislo", RE_VVZ)):
+            if not out[pole]:
+                m = rx.search(val)
+                if m:
+                    out[pole] = m.group(0)
+        if not out["profil_url"] and "profil" in kc_ and val.startswith(("https://", "http://")) and " " not in val:
+            out["profil_url"] = val[:300]
+    return out
+
+
 def extract(rec, zdroj="rvz"):
     """Vrati (zakazka_dict, vitezove_list, ucastnici_list)."""
     leaves, dicts = _flatten(rec)
@@ -161,7 +205,8 @@ def extract(rec, zdroj="rvz"):
     if zid is None:
         zid = _pick(leaves, lambda k: k.endswith("id") or k.startswith("kod") or "evidencn" in k,
                     ctx_test=_not_in(*AUTHORITY_CTX, "dokument", "dodavatel", "ucastnik"),
-                    value_test=lambda v: isinstance(v, (str, int)) and len(str(v)) >= 5)
+                    value_test=lambda v: isinstance(v, (str, int)) and len(str(v)) >= 5
+                    and not RE_NE_ID.fullmatch(str(v).strip()))
 
     nazev = _pick(leaves, lambda k: k in ("nazev", "nazevvz", "nazevzakazky", "nazevverejnezakazky", "title", "nazevzp"),
                   ctx_test=_not_in(*AUTHORITY_CTX, *WINNER_CTX, *BIDDER_CTX, "dokument", "priloh", "kriteri",
@@ -292,7 +337,7 @@ def extract(rec, zdroj="rvz"):
             vitezove[k0] = to_float(cena)
 
     zak = {
-        "id": f"{zdroj}:{zid}" if zid is not None else None,
+        "id": id_zakazky(zdroj, zid, nazev),
         "zdroj": zdroj,
         "nazev": nazev,
         "zadavatel_ico": zad_ico,
@@ -323,6 +368,7 @@ def extract(rec, zdroj="rvz"):
         if ("obrat" in kc_ or "turnover" in kc_) and _num(val) and (to_float(val) or 0) >= 10_000:
             min_obrat = max(min_obrat or 0, to_float(val))
     zak["kvalifikace"] = " | ".join(kval[:6])[:1200] or None
+    zak.update(identifikatory(leaves, zid))
     zak["min_obrat"] = min_obrat
     vit = [{"dodavatel_ico": k[0] or None, "dodavatel_nazev": k[1] or None, "cena_bez_dph": v} for k, v in vitezove.items()]
     uc = [{"dodavatel_ico": k[0] or None, "dodavatel_nazev": k[1] or None, "nabidkova_cena": v} for k, v in ucastnici.items()]

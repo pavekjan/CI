@@ -192,7 +192,8 @@ class RateLimiter:
 
 
 class DenniLimit:
-    """Strop poctu volani placeneho API za den (pro celou aplikaci). Chrani penezenku."""
+    """Strop poctu volani placeneho API za den (pro celou aplikaci). Chrani penezenku.
+    limit None = bez limitu (jen se pocita), 0 = zakazano."""
 
     def __init__(self, limit):
         self.limit = limit
@@ -204,7 +205,7 @@ class DenniLimit:
             dnes = date.today()
             if self._den != dnes:
                 self._den, self._n = dnes, 0
-            if self.limit <= 0 or self._n >= self.limit:
+            if self.limit is not None and (self.limit <= 0 or self._n >= self.limit):
                 return False
             self._n += 1
             return True

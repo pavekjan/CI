@@ -66,8 +66,33 @@ MAX_TELO = 512 * 1024          # max. velikost JSON tela pozadavku
 LIMIT_API = bezpecnost.RateLimiter(int(os.environ.get("TS_LIMIT_ZA_MINUTU") or 120), 60)
 LIMIT_DRAHE = bezpecnost.RateLimiter(int(os.environ.get("TS_LIMIT_DRAHE_ZA_MINUTU") or 10), 60)
 LIMIT_HESLO = bezpecnost.RateLimiter(5, 15 * 60)   # 5 chybnych hesel za 15 minut na IP
-# denni strop volani AI (Claude, OpenAI, Gemini...) pro celou aplikaci - ochrana penezenky
-LLM_DEN = bezpecnost.DenniLimit(int(os.environ.get("TS_LIMIT_LLM_DEN") or os.environ.get("TS_LIMIT_CLAUDE_DEN") or 30))
+# denni strop volani AI pro celou aplikaci - ochrana penezenky. Poradi: promenna prostredi TS_AI_DENNI_LIMIT
+# (0 = bez limitu) > nastaveni spravce na strance Data > vychozi: placene AI 30 volani/den, bezplatne bez limitu
+# (tam hlida limit sam poskytovatel; kdyz ho prekrocime, onboarding tise prejde na pravidla).
+AI_LIMIT_ENV = (os.environ.get("TS_AI_DENNI_LIMIT") or os.environ.get("TS_LIMIT_LLM_DEN")
+                or os.environ.get("TS_LIMIT_CLAUDE_DEN") or "").strip()
+AI_LIMIT_PLACENE = 30
+LLM_DEN = bezpecnost.DenniLimit(AI_LIMIT_PLACENE)
+
+
+def ai_limit(cfg=None):
+    """Platny denni strop volani AI. None = bez limitu."""
+    from ts import llm
+    cfg = cfg if cfg is not None else (STATE["cfg"] or {})
+    v = AI_LIMIT_ENV if AI_LIMIT_ENV else cfg.get("ai_denni_limit")
+    if v not in (None, ""):
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            n = AI_LIMIT_PLACENE
+        return None if n <= 0 else n
+    return None if llm.je_zdarma(cfg) else AI_LIMIT_PLACENE
+
+
+def llm_vezmi():
+    """Zapocita jedno volani AI; False = dnesni strop vycerpan (volajici pouzije pravidla)."""
+    LLM_DEN.limit = ai_limit()
+    return LLM_DEN.vezmi()
 EXA_DEN = bezpecnost.DenniLimit(int(os.environ.get("TS_LIMIT_EXA_DEN") or 40))
 MAX_EXPORTU = 20
 
@@ -127,7 +152,9 @@ def nastaveni_get(admin=True):
             "ai": {"poskytovatel": prov, "pripraveno": bool(aktivni), "model": aktivni["model"] if aktivni else None,
                    "poskytovatele": poskytovatele, "anthropic_sdk": llm.dostupne()},
             "verejne": SEC["verejne"], "admin": admin,
-            "limity": {"ai_dnes": LLM_DEN.pouzito, "ai_max": LLM_DEN.limit,
+            "limity": {"ai_dnes": LLM_DEN.pouzito, "ai_max": ai_limit(c),
+                       "ai_limit_env": bool(AI_LIMIT_ENV), "ai_limit_nastaveny": c.get("ai_denni_limit"),
+                       "ai_vychozi": "bez limitu" if llm.je_zdarma(c) else str(AI_LIMIT_PLACENE),
                        "exa_dnes": EXA_DEN.pouzito, "exa_max": EXA_DEN.limit}}
 
 
@@ -163,6 +190,15 @@ def nastaveni_set(body):
     hodnoty = _ai_hodnoty(body)
     if "obsidian_vault" in body and not SEC["verejne"]:  # server nezapisuje do libovolnych slozek
         hodnoty["obsidian_vault"] = bezpecnost.text(body.get("obsidian_vault"), 500, "cesta k Obsidianu")
+    if "ai_denni_limit" in body:  # prazdne = vychozi, 0 = bez limitu
+        v = body.get("ai_denni_limit")
+        if v in (None, ""):
+            hodnoty["ai_denni_limit"] = None
+        else:
+            try:
+                hodnoty["ai_denni_limit"] = max(0, min(100000, int(v)))
+            except (TypeError, ValueError):
+                raise bezpecnost.ChybaVstupu("Denní limit AI musí být celé číslo (0 = bez limitu).")
     if body.get("exa_api_key"):
         hodnoty["exa_api_key"] = bezpecnost.klic_api(body.get("exa_api_key"), "Exa klíč")
     lokal = {}
@@ -195,13 +231,26 @@ def ai_akce(body, akce):
     try:
         if akce == "modely":
             return {"ok": True, "modely": llm.modely(n)}
-        if not LLM_DEN.vezmi():
+        if not llm_vezmi():
             raise bezpecnost.ChybaVstupu("Denní limit volání AI je vyčerpán.")
         return llm.vyzkousej(n)
     except bezpecnost.ChybaVstupu:
         raise
     except Exception as e:
         return {"ok": False, "chyba": llm.chyba_text(e)}
+
+
+def ai_limity_stav():
+    """Limity aktivniho AI poskytovatele: z dokumentace, nase pocitadla, zivy stav (OpenRouter) a pauza po 429/402."""
+    from ts import ai_limity, llm
+    from ts.util import session
+    n = llm.nastaveni(STATE["cfg"])
+    if not n:
+        return {"ok": False, "chyba": "AI není nastavená."}
+    if n["typ"] == "openai":
+        ai_limity.zivy_stav(n, session().get)
+    lim = ai_limit()
+    return {"ok": True, **ai_limity.stav(n), "aplikace": {"dnes": LLM_DEN.pouzito, "max": lim}}
 
 
 def export_obsidian(ico, zapsat, cfg):
@@ -270,6 +319,10 @@ def run_update(rezim):
             cfg["obor"] = "vse"
             if rezim == "rychle":
                 cfg.update({"mesice": 3, "smlouvy_mesice": 0, "smlouvy_souhrn_mesice": 0, "ares_max_firem": 30})
+            elif rezim == "registr":
+                # jen Registr smluv: 36 mesicu souhrnu + 3 mesice detailu najednou (stahnout_registr_3roky.bat)
+                cfg.update({"rvz_preskocit": True, "smlouvy_mesice": 3, "smlouvy_souhrn_mesice": 36,
+                            "ares_max_firem": 0, "mazat_stazene": True})
             elif rezim == "zakazky":
                 # jen zakazky z ISVZ (12 mesicu); Registr smluv doplnuje GitHub Actions
                 cfg.update({"mesice": cfg.get("mesice", 12), "smlouvy_mesice": 0, "smlouvy_souhrn_mesice": 0,
@@ -634,6 +687,10 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == "/api/nastaveni":
             self._vyzaduj_admin()
             return self._json(nastaveni_set(body) | {"admin": True})
+        if u.path == "/api/ai/limity":
+            self._vyzaduj_admin()
+            self._drahe()
+            return self._json(ai_limity_stav())
         if u.path in ("/api/ai/modely", "/api/ai/test"):
             self._vyzaduj_admin()
             self._drahe()
@@ -661,12 +718,12 @@ class Handler(BaseHTTPRequestHandler):
                     ico = bezpecnost.ico(body.get("ico"))
                     web = bezpecnost.over_url(body.get("web")) if (body.get("web") and not STATE["demo"]) else None
                     return self._json(onboarding.start(con, cfg_pro(admin), ico, web, online=not STATE["demo"],
-                                                       vlastnik=vlastnik, llm_povolit=LLM_DEN.vezmi))
+                                                       vlastnik=vlastnik, llm_povolit=llm_vezmi))
                 if u.path == "/api/onboarding/dokoncit":
                     self._drahe()
                     return self._json(onboarding.dokonci(con, cfg_pro(admin), bezpecnost.ico(body.get("ico")),
                                                          bezpecnost.odpovedi(body.get("odpovedi") or {}),
-                                                         vlastnik=vlastnik, llm_povolit=LLM_DEN.vezmi))
+                                                         vlastnik=vlastnik, llm_povolit=llm_vezmi))
                 if u.path.endswith("/profil"):
                     profil = body.get("profil")
                     if not isinstance(profil, dict):

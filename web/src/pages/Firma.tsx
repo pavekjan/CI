@@ -111,7 +111,8 @@ export default function Firma({ ico, prazdnaDb }: { ico: string; prazdnaDb?: boo
       ) : (
         <>
           {/* skore */}
-          <Card title="Skóre konkurenceschopnosti" sub="Vážený průměr pěti složek (0–100). Každá složka ukazuje, z čeho vychází.">
+          <Card title="Skóre konkurenceschopnosti" sub="Vážený průměr pěti složek (0–100) ze soutěží (RVZ) i Registru smluv. Každá složka ukazuje, z čeho vychází."
+            right={p.skore.malo_dat ? <span className="badge warn" title="Málo soutěží nebo složek – skóre je jen orientační">málo dat</span> : undefined}>
             <div className="grid scoregrid">
               <div className="score">
                 <div className="score-num">{p.skore.celkem ?? "–"}<small> / 100</small></div>
@@ -119,7 +120,7 @@ export default function Firma({ ico, prazdnaDb }: { ico: string; prazdnaDb?: boo
               <div>
                 {p.skore.slozky.map((s) => (
                   <div className="comp" key={s.klic}>
-                    <div><b>{s.nazev}</b> <span className="muted small">váha {s.vaha} %</span></div>
+                    <div><b>{s.nazev}</b> <span className="muted small">váha {s.vaha} %</span>{s.malo_dat && <span className="badge warn" style={{ marginLeft: 6 }}>málo dat</span>}</div>
                     <div className="meter" role="meter" aria-valuenow={s.skore ?? 0} aria-valuemin={0} aria-valuemax={100} aria-label={s.nazev}>
                       <div style={{ width: `${s.skore ?? 0}%`, opacity: s.skore === null ? 0 : 1 }} />
                     </div>

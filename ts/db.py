@@ -132,7 +132,9 @@ def connect(path=None):
     con.execute("PRAGMA journal_mode=WAL")  # aplikace muze cist, zatimco agenti zapisuji
     con.executescript(SCHEMA)
     sloupce = {r[1] for r in con.execute("PRAGMA table_info(zakazky)")}
-    for sl in ("kvalifikace TEXT", "min_obrat REAL"):  # podminky ucasti, pokud je zdroj uvadi (extractor)
+    for sl in ("kvalifikace TEXT", "min_obrat REAL",  # podminky ucasti, pokud je zdroj uvadi (extractor)
+               # identifikatory pro dohledani zakazky na internetu (ts/odkazy.py)
+               "nipez_id TEXT", "nen_cislo TEXT", "vvz_cislo TEXT", "profil_url TEXT"):
         if sl.split()[0] not in sloupce:
             con.execute(f"ALTER TABLE zakazky ADD COLUMN {sl}")  # nosec B608 - konstanta z kodu
     if "cpv_odhad" not in sloupce:  # odhad segmentu u zakazek bez CPV ("slova" / "ai"), viz ts/segmenty.py

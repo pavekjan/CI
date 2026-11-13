@@ -2,11 +2,14 @@
 
 Vsechno se pocita z lokalni SQLite databaze, kterou plni agenti (Scout/Extractor/Verifier).
 ARES a zpravy se pro otevrenou firmu dotahuji zivě (s cache)."""
+import math
 import re
 import statistics
 from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta
 from urllib.parse import quote
+
+from .odkazy import odkazy as _odkazy
 
 CPV_DIV = {
     "03": "Zemědělské a lesnické produkty", "09": "Paliva a energie", "14": "Těžba a kovy", "15": "Potraviny a nápoje",
@@ -23,6 +26,11 @@ CPV_DIV = {
     "79": "Obchodní služby (právo, marketing, HR)", "80": "Vzdělávání", "85": "Zdravotní a sociální služby",
     "90": "Odpady, úklid, životní prostředí", "92": "Kultura, sport, rekreace", "98": "Ostatní služby",
 }
+
+
+def odkaz(z):
+    """Nejlepsi odkaz na zakazku (NEN, zdroj, Vestnik, nebo hledani na Hlidaci statu)."""
+    return _odkazy(z)["url"]
 
 
 def cpv_group(cpv):
@@ -46,6 +54,11 @@ def _median(xs):
 
 def _pc(x):
     return f"{x * 100:.0f} %"
+
+
+def _kc(x):
+    x = x or 0
+    return f"{x / 1e9:.1f} mld. Kč" if x >= 1e9 else f"{x / 1e6:.1f} mil. Kč" if x >= 1e6 else f"{x / 1e3:.0f} tis. Kč"
 
 
 def _pomer(cena, odhad, nazev=None):
@@ -88,8 +101,39 @@ def _is_open(z, today):
 
 
 # ---------------------------------------------------------------- index dodavatelu
+def doplnit_ico_podle_nazvu(con):
+    """Cast zaznamu v open datech uvadi dodavatele jen nazvem (bez ICO), napr. "Alza.cz a.s." u nabidky do
+    souteze. Kdyz stejny nazev jinde v datech jednoznacne patri jednomu ICO, ICO se doplni.
+    Vraci pocet doplnenych radku."""
+    mapa = {}
+    for tab in ("vitezove", "ucastnici"):
+        # bezpecnost: tab je konstanta z kodu (vedome potlaceni nalezu banditu, viz SECURITY.md)
+        for ico, nazev in con.execute(f"SELECT DISTINCT dodavatel_ico, dodavatel_nazev FROM {tab} "  # nosec B608
+                                      "WHERE dodavatel_ico IS NOT NULL AND dodavatel_nazev IS NOT NULL"):
+            mapa.setdefault(norm(nazev), set()).add(ico)
+    n = 0
+    for tab in ("vitezove", "ucastnici"):
+        bez = con.execute(f"SELECT rowid, zakazka_id, dodavatel_nazev FROM {tab} "  # nosec B608
+                          "WHERE dodavatel_ico IS NULL AND dodavatel_nazev IS NOT NULL").fetchall()
+        for rowid, zid, nazev in bez:
+            ica = mapa.get(norm(nazev))
+            if not ica or len(ica) != 1:
+                continue
+            ico = next(iter(ica))
+            if con.execute(f"SELECT 1 FROM {tab} WHERE zakazka_id=? AND dodavatel_ico=?", (zid, ico)).fetchone():  # nosec B608
+                con.execute(f"DELETE FROM {tab} WHERE rowid=?", (rowid,))  # nosec B608 - duplicitni radek bez ICO
+            else:
+                con.execute(f"UPDATE OR IGNORE {tab} SET dodavatel_ico=? WHERE rowid=?", (ico, rowid))  # nosec B608
+            n += 1
+    con.commit()
+    return n
+
+
 def rebuild_index(con):
     """Tabulka `dodavatele` pro rychle vyhledavani (vola se po kazde aktualizaci dat)."""
+    doplneno = doplnit_ico_podle_nazvu(con)
+    if doplneno:
+        log(A, f"Index: doplněno IČO podle názvu u {doplneno} dodavatelů")
     con.execute("DELETE FROM dodavatele")
     agg = {}
 
@@ -457,32 +501,44 @@ def profil(con, ico, cfg, today=None, online=True):
     stare = sum(1 for w in wins if t12 <= (w["datum_zahajeni"] or "") < t6)
 
     # ---- skore konkurenceschopnosti ----
+    rs_souhrn = rs_firmy(con, ico)
     slozky = []
-    # 1 uspesnost
-    if win_rate is not None and len(zname) >= 3:
+    # 1 uspesnost v soutezich (RVZ). Pri malem vzorku se win rate "smrsti" k medianu trhu (Bayesuv odhad
+    #   s K virtualnimi soutezemi), aby 0 ze 3 neznamenalo 0 bodu.
+    K_SHRINK = 5
+    if win_rate is not None and len(zname) >= 1:
         # trzni srovnani jen z firem, u kterych zdroj uvadi ucastniky (jinak by win rate byl umele 100 %)
         rates = [r[0] / r[1] for r in con.execute("SELECT vyhry_zname, ucasti_zname FROM dodavatele WHERE ucasti_zname >= 3")]
-        trh_wr = _median(rates)
-        sc = _clamp(50 + (win_rate - (trh_wr or 0)) * 150)
-        slozky.append({"klic": "uspesnost", "nazev": "Úspěšnost v soutěžích", "vaha": 25, "skore": round(sc),
-                       "vysvetleni": f"Win rate {_pc(win_rate)} ze {len(zname)} soutěží se známými účastníky; medián trhu {_pc(trh_wr)}." if trh_wr is not None else f"Win rate {_pc(win_rate)}."})
+        trh_wr = _median(rates) or 0.3
+        n_z, v_z = len(zname), len(win_ids & zname)
+        wr_adj = (v_z + K_SHRINK * trh_wr) / (n_z + K_SHRINK)
+        sc = _clamp(50 + (wr_adj - trh_wr) * 150)
+        malo = n_z < 5
+        slozky.append({"klic": "uspesnost", "nazev": "Úspěšnost v soutěžích", "vaha": 25, "skore": round(sc), "malo_dat": malo,
+                       "vysvetleni": f"Win rate {_pc(win_rate)} ({v_z} z {n_z} soutěží se známými účastníky); medián trhu {_pc(trh_wr)}."
+                                     + (f" Málo dat: odhad je přitažený k mediánu trhu (jako by firma měla navíc {K_SHRINK} "
+                                        f"průměrných soutěží), upravený win rate {_pc(wr_adj)}." if malo else "")})
     elif ucast_ids:
         slozky.append({"klic": "uspesnost", "nazev": "Úspěšnost v soutěžích", "vaha": 25, "skore": None,
                        "vysvetleni": "Data o neúspěšných nabídkách chybějí (u části zakázek je zdroj neuvádí) – nelze spočítat."})
-    # 2 trzni pozice
-    seg_cpv = [s for s in segmenty if s["segment"] != NEUVEDENO]
-    if seg_cpv:
-        podily = [(s["podil"] or 0, s["objem"]) for s in seg_cpv if s["trh_objem"]]
-        wsum = sum(o for _, o in podily) or 1
-        vazeny = sum(p * o for p, o in podily) / wsum
-        objemy = [r[0] for r in con.execute("SELECT objem FROM dodavatele WHERE objem > 0")]
-        pr = _percentile_rank(objemy, objem) or 0
-        sc = _clamp(0.6 * pr + 0.4 * min(100, vazeny * 400))
-        top = seg_cpv[0]
+    # 2 trzni pozice: objem verejnych trzeb = vyhry v RVZ + smlouvy v Registru smluv (i male zakazky a e-shopy)
+    rs_objem = (rs_souhrn or {}).get("objem", 0) or 0
+    verejne = objem + rs_objem
+    if verejne > 0:
+        rs_mapa = {r[0]: r[1] or 0 for r in con.execute("SELECT ico, SUM(hodnota) FROM smlouvy_souhrn GROUP BY ico")}
+        rvz_mapa = {r[0]: r[1] or 0 for r in con.execute("SELECT ico, objem FROM dodavatele WHERE objem > 0")}
+        vsechny = [rvz_mapa.get(k, 0) + rs_mapa.get(k, 0) for k in set(rs_mapa) | set(rvz_mapa)]
+        pr = _percentile_rank(vsechny, verejne) or 0
+        seg_cpv = [s for s in segmenty if s["segment"] != NEUVEDENO]
+        top = seg_cpv[0] if seg_cpv else None
+        # poradi v hlavnim segmentu: 1. ze 100 -> 100 bodu, prostredni -> 50
+        por = (100 * (1 - (top["poradi"] - 1) / max(1, top["dodavatelu"]))) if (top and top["poradi"]) else None
+        sc = _clamp(0.7 * pr + 0.3 * por) if por is not None else _clamp(pr)
         slozky.append({"klic": "pozice", "nazev": "Tržní pozice", "vaha": 25, "skore": round(sc),
-                       "vysvetleni": f"Objem větší než u {pr:.0f} % dodavatelů; v hlavním segmentu {top['segment']} "
-                                     + (f"{top['poradi']}. z {top['dodavatelu']} dodavatelů" if top['poradi'] else f"mezi {top['dodavatelu']} dodavateli")
-                                     + (f" ({_pc(top['podil'])} objemu)." if top['podil'] else ".")})
+                       "vysvetleni": f"Veřejné tržby {_kc(verejne)} (soutěže {_kc(objem)} + Registr smluv {_kc(rs_objem)}) "
+                                     f"jsou vyšší než u {pr:.0f} % dodavatelů."
+                                     + ((f" V hlavním segmentu {top['segment']} " + (f"{top['poradi']}. z {top['dodavatelu']} dodavatelů." if top['poradi'] else f"mezi {top['dodavatelu']} dodavateli."))
+                                        if top else "")})
     # 3 cena
     if med_pomer is not None and trh_med_pomer is not None and len(ceny) >= 2:
         diff = trh_med_pomer - med_pomer
@@ -490,20 +546,39 @@ def profil(con, ico, cfg, today=None, online=True):
         slozky.append({"klic": "cena", "nazev": "Cenová konkurenceschopnost", "vaha": 20, "skore": round(sc),
                        "vysvetleni": f"Vítězí v mediánu za {_pc(med_pomer)} předpokládané hodnoty, trh v týchž segmentech za {_pc(trh_med_pomer)} "
                                      f"({len(ceny)} zakázek se skutečnou cenou; rámcové dohody a ceny shodné s odhadem nepočítáme)."})
-    # 4 diverzifikace
-    if klienti:
-        sc = _clamp((1 - (hhi or 1)) * 100 * 0.7 + min(30, len(klienti) * 3))
+    # 4 sire klientske zakladny: zadavatele z vyher v RVZ i odberatele z Registru smluv
+    obj_k = defaultdict(float)
+    for k in klienti:
+        obj_k[k["ico"]] += k["objem"] or 0
+    for r in con.execute("SELECT zadavatel_ico, SUM(hodnota) FROM smlouvy_odberatele WHERE ico=? GROUP BY zadavatel_ico", (ico,)):
+        if r[0]:
+            obj_k[r[0]] += r[1] or 0
+    if obj_k:
+        tot_k = sum(obj_k.values())
+        hhi_k = sum((v / tot_k) ** 2 for v in obj_k.values()) if tot_k else 1
+        sc = _clamp((1 - hhi_k) * 60 + min(40, 40 * math.log10(1 + len(obj_k)) / 2))   # 100 zakazniku -> plnych 40 bodu
+        nejv = max(obj_k.values()) / tot_k if tot_k else None
         slozky.append({"klic": "klienti", "nazev": "Šíře klientské základny", "vaha": 15, "skore": round(sc),
-                       "vysvetleni": f"{len(klienti)} zadavatelů; největší tvoří {_pc(shares[0])} objemu." if shares else f"{len(klienti)} zadavatelů."})
-    # 5 trend
-    if nove or stare:
-        ratio = (nove + 1) / (stare + 1)
-        sc = _clamp(50 + (ratio - 1) * 50)
+                       "vysvetleni": f"{len(obj_k)} veřejných zákazníků (soutěže + Registr smluv)"
+                                     + (f"; největší tvoří {_pc(nejv)} objemu." if nejv is not None else ".")})
+    # 5 dynamika: vyhry 6 v 6 mesicu, a kdyz Registr smluv pokryva aspon 12 mesicu, i pocet smluv
+    rs_mes = {m["mesic"]: m["pocet"] for m in (rs_souhrn or {}).get("mesice", [])}
+    m6, m12 = (today - timedelta(days=183)).isoformat()[:7], (today - timedelta(days=366)).isoformat()[:7]
+    rs_nove = sum(n for m, n in rs_mes.items() if m >= m6)
+    rs_stare = sum(n for m, n in rs_mes.items() if m12 <= m < m6)
+    rs_pokryti = len({m for m in rs_mes if m >= m12}) >= 10
+    if nove or stare or (rs_pokryti and (rs_nove or rs_stare)):
+        a, b_ = nove + (rs_nove if rs_pokryti else 0), stare + (rs_stare if rs_pokryti else 0)
+        ratio = (a + 1) / (b_ + 1)
+        sc = _clamp(50 + math.log2(ratio) * 25)
         slozky.append({"klic": "trend", "nazev": "Dynamika", "vaha": 15, "skore": round(sc),
-                       "vysvetleni": f"{nove} výher za posledních 6 měsíců vs. {stare} v předchozích 6."})
+                       "vysvetleni": f"{nove} výher za posledních 6 měsíců vs. {stare} v předchozích 6"
+                                     + (f"; smlouvy v Registru {rs_nove} vs. {rs_stare}." if rs_pokryti else
+                                        " (Registr smluv zatím nepokrývá celý rok, do dynamiky se nepočítá).")})
     platne = [s for s in slozky if s["skore"] is not None]
     celk = round(sum(s["skore"] * s["vaha"] for s in platne) / sum(s["vaha"] for s in platne)) if platne else None
     hodnoceni = None if celk is None else ("vysoká" if celk >= 65 else "střední" if celk >= 40 else "nízká")
+    malo_dat = sum(1 for s_ in platne) < 3 or any(s_.get("malo_dat") for s_ in platne)
 
     # ---- prilezitosti v jejich segmentech ----
     klienti_ico = {k["ico"] for k in klienti}
@@ -517,7 +592,7 @@ def profil(con, ico, cfg, today=None, online=True):
             if z["zadavatel_ico"] in klienti_ico:
                 duvody.insert(0, "zadavatel je jejich klient")
             prilez.append({"id": z["id"], "nazev": z["nazev"], "zadavatel": z["zadavatel_nazev"], "hodnota": z["predpokladana_hodnota"],
-                           "lhuta": (z["lhuta_nabidek"] or "")[:10], "url": z["url"], "duvody": duvody,
+                           "lhuta": (z["lhuta_nabidek"] or "")[:10], "url": odkaz(z), "duvody": duvody,
                            "klient": z["zadavatel_ico"] in klienti_ico})
         prilez.sort(key=lambda p: (not p["klient"], -(p["hodnota"] or 0)))
 
@@ -526,18 +601,17 @@ def profil(con, ico, cfg, today=None, online=True):
     for w in wins:
         zak_list.append({"id": w["id"], "nazev": w["nazev"], "zadavatel": w["zadavatel_nazev"], "datum": w["datum_zahajeni"],
                          "odhad": w["predpokladana_hodnota"], "cena": w["cena_bez_dph"], "vysledek": "výhra",
-                         "nabidek": w["pocet_nabidek"], "segment": cpv_group(w["cpv_hlavni"]), "url": w["url"],
+                         "nabidek": w["pocet_nabidek"], "segment": cpv_group(w["cpv_hlavni"]), "url": odkaz(w),
                          "overeno_rs": bool(w["overeno_rs"])})
     for u in prohry:
         zak_list.append({"id": u["id"], "nazev": u["nazev"], "zadavatel": u["zadavatel_nazev"], "datum": u["datum_zahajeni"],
                          "odhad": u["predpokladana_hodnota"], "cena": u["nabidkova_cena"], "vysledek": "neúspěch",
-                         "nabidek": u["pocet_nabidek"], "segment": cpv_group(u["cpv_hlavni"]), "url": u["url"], "overeno_rs": False})
+                         "nabidek": u["pocet_nabidek"], "segment": cpv_group(u["cpv_hlavni"]), "url": odkaz(u), "overeno_rs": False})
     zak_list.sort(key=lambda z: z["datum"] or "", reverse=True)
 
     rs = con.execute("""SELECT COUNT(DISTINCT s.id), SUM(s.hodnota_bez_dph) FROM smlouvy s JOIN smlouvy_strany st ON st.smlouva_id=s.id
                         WHERE st.ico=? AND s.zadavatel_ico != ?""", (ico, ico)).fetchone()
     priznaky = [dict(r) for r in con.execute("SELECT typ, popis FROM priznaky WHERE objekt_id=?", (ico,))]
-    rs_souhrn = rs_firmy(con, ico)
 
     return {
         "ico": ico, "nazev": nazev, "ares": firma or None,
@@ -548,7 +622,7 @@ def profil(con, ico, cfg, today=None, online=True):
                 "smluv_rs": rs[0] or 0, "objem_rs": rs[1] or 0,
                 "smluv_rs_souhrn": (rs_souhrn or {}).get("pocet", 0), "objem_rs_souhrn": (rs_souhrn or {}).get("objem", 0),
                 "overeno_rs": sum(1 for w in wins if w["overeno_rs"])},
-        "skore": {"celkem": celk, "hodnoceni": hodnoceni, "slozky": slozky},
+        "skore": {"celkem": celk, "hodnoceni": hodnoceni, "slozky": slozky, "malo_dat": malo_dat},
         "mesice": mesice, "segmenty": segmenty, "klienti": klienti[:12], "ceny": ceny,
         "souboje": souboje, "rivalove": rivalove, "regiony": [{"kraj": k, "pocet": n} for k, n in regiony],
         "prilezitosti": prilez[:20], "zakazky": zak_list[:200], "priznaky": priznaky,

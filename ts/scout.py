@@ -33,10 +33,7 @@ def _save_zakazka(con, zak, vit, uc):
     cols = list(zak.keys()) + ["stazeno"]
     con.execute(f"INSERT OR REPLACE INTO zakazky ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
                 [zak[c] for c in zak] + [now])
-    if vit:
-        con.execute("DELETE FROM vitezove WHERE zakazka_id=?", (zak["id"],))
-    if uc:
-        con.execute("DELETE FROM ucastnici WHERE zakazka_id=?", (zak["id"],))
+    # vitezove a ucastnici z vice zaznamu teze zakazky (casti, vysledek po castech) se scitaji, neprepisuji
     for v in vit:
         con.execute("INSERT OR REPLACE INTO vitezove (zakazka_id, dodavatel_ico, dodavatel_nazev, cena_bez_dph) VALUES (?,?,?,?)",
                     (zak["id"], v["dodavatel_ico"], v["dodavatel_nazev"], v["cena_bez_dph"]))
@@ -71,6 +68,9 @@ def je_nedostupny(e):
 def scout_rvz(con, cfg, today=None):
     """Stahne mesicni open data RVZ za poslednich N mesicu, Extractor z nich vytahne zakazky
     a ulozi jen ty relevantni pro obor (CPV prefix nebo klicove slovo)."""
+    if cfg.get("rvz_preskocit"):  # jen Registr smluv (GitHub Actions, stahnout_registr_3roky.bat)
+        log(A, "RVZ: v tomto rezimu se zakazky nestahuji (jen Registr smluv)")
+        return {"preskoceno": True}
     obor = cfg["obory"][cfg["obor"]]
     vse = cfg["obor"] == "vse"  # aplikace: ukladame vsechny obory, aby slo profilovat libovolnou firmu
     base = cfg["zdroje"]["rvz_base"]
@@ -78,15 +78,13 @@ def scout_rvz(con, cfg, today=None):
     stats = {"souboru": 0, "zaznamu": 0, "relevantnich": 0, "novych": 0}
     months = months_back(cfg["mesice"] + 1, today)  # +1: aktualni mesic jeste neni zverejnen
     verze = con.execute("SELECT podpis FROM soubory WHERE klic='extractor_verze'").fetchone()
-    if verze and verze[0] != str(extractor.EXTRACTOR_VERZE) or (not verze and con.execute("SELECT COUNT(*) FROM zakazky").fetchone()[0]):
-        # novy Extractor cte data jinak -> stare vytezene udaje zahodit a uz stazene soubory zpracovat znovu
-        log(A, f"Nová verze Extractoru ({extractor.EXTRACTOR_VERZE}): přepočítávám už stažené soubory (stahovat se znovu nebudou)")
-        for t in ("vitezove", "ucastnici", "zakazky", "priznaky", "dodavatele"):
-            # bezpecnost: t je konstanta z kodu (vedome potlaceni nalezu banditu, viz SECURITY.md)
-            con.execute(f"DELETE FROM {t}")  # nosec B608
-        con.execute("DELETE FROM soubory WHERE klic LIKE 'rvz:%'")
-    con.execute("INSERT OR REPLACE INTO soubory VALUES ('extractor_verze', ?)", (str(extractor.EXTRACTOR_VERZE),))
-    con.commit()
+    # novy Extractor cte data jinak -> stare vytezene udaje zahodit a soubory zpracovat znovu. Ale az ve chvili,
+    # kdy je prvni soubor opravdu k dispozici: kde ISVZ neodpovida (GitHub, Render), se nic nesmaze.
+    prepocet = bool(verze and verze[0] != str(extractor.EXTRACTOR_VERZE)
+                    or (not verze and con.execute("SELECT COUNT(*) FROM zakazky").fetchone()[0]))
+    if not prepocet:
+        con.execute("INSERT OR REPLACE INTO soubory VALUES ('extractor_verze', ?)", (str(extractor.EXTRACTOR_VERZE),))
+        con.commit()
     nedostupne = 0  # server ISVZ nekdy z cloudu (napr. Render) vubec neodpovida -> nezkouset dalsi mesice
     for i, (y, m) in enumerate(months):
         if (y, m) < (2024, 2):
@@ -110,6 +108,16 @@ def scout_rvz(con, cfg, today=None):
         if not path:
             rvz.log_missing(y, m)
             continue
+        if prepocet:
+            log(A, f"Nová verze Extractoru ({extractor.EXTRACTOR_VERZE}): zpracovávám zakázky znovu "
+                   "(už stažené soubory se berou z cache, starší měsíce se stáhnou znovu)")
+            for t in ("vitezove", "ucastnici", "zakazky", "priznaky", "dodavatele"):
+                # bezpecnost: t je konstanta z kodu (vedome potlaceni nalezu banditu, viz SECURITY.md)
+                con.execute(f"DELETE FROM {t}")  # nosec B608
+            con.execute("DELETE FROM soubory WHERE klic LIKE 'rvz:%'")
+            con.execute("INSERT OR REPLACE INTO soubory VALUES ('extractor_verze', ?)", (str(extractor.EXTRACTOR_VERZE),))
+            con.commit()
+            prepocet = False
         stats["souboru"] += 1
         klic = f"rvz:{os.path.basename(path)}:{cfg['obor']}:{nase or ''}:x{extractor.EXTRACTOR_VERZE}"
         if _uz_zpracovano(con, klic, path):

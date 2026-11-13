@@ -43,6 +43,7 @@ export interface Slozka {
   vaha: number;
   skore: number | null;
   vysvetleni: string;
+  malo_dat?: boolean;
 }
 
 export interface Profil {
@@ -84,7 +85,7 @@ export interface Profil {
   } | null;
   obdobi?: Obdobi;
   hlidac?: { url: string; pocet: number | null };
-  skore: { celkem: number | null; hodnoceni: string | null; slozky: Slozka[] };
+  skore: { celkem: number | null; hodnoceni: string | null; slozky: Slozka[]; malo_dat?: boolean };
   mesice: { mesic: string; vyhry: number; objem: number; ucasti: number }[];
   segmenty: {
     segment: string;
@@ -147,14 +148,23 @@ export interface Nastaveni {
   exa_api_key_nastaven: boolean;
   exa_api_key_nahled: string;
   ai: { poskytovatel: string; pripraveno: boolean; model: string | null; anthropic_sdk: boolean; poskytovatele: AiPoskytovatel[] };
-  limity?: { ai_dnes: number; ai_max: number; exa_dnes: number; exa_max: number };
+  limity?: { ai_dnes: number; ai_max: number | null; ai_limit_env?: boolean; ai_limit_nastaveny?: number | null; ai_vychozi?: string; exa_dnes: number; exa_max: number };
 }
 export interface AiPoskytovatel {
   id: string; nazev: string; web: string; potrebuje_klic: boolean; ma_klic_pole: boolean; vlastni_url: boolean; env: string | null;
   klic_nastaven: boolean; klic_nahled: string; model: string; model_vychozi: string; url: string;
   zdarma: boolean; limit: string; pozn: string; soukromi_ok: boolean; potrebuje_ucet: boolean; ucet: string;
 }
-export interface AiForm { llm_poskytovatel?: string; llm_klic?: string; llm_model?: string; llm_url?: string; llm_ucet?: string }
+export interface AiLimity {
+  ok: boolean; chyba?: string; poskytovatel?: string; model?: string;
+  limity?: { rpm?: number; rph?: number; rpd?: number; tpm?: number; tpd?: number; mesicne?: number; soubezne?: number; pozn?: string; zdroj?: string };
+  za_minutu?: number; dnes?: number; za_mesic?: number;
+  pauza?: { duvod: string; zbyva: string } | null;
+  hlavicky?: { zbyva_dotazu?: number | null; limit_dotazu?: number | null; zbyva_tokenu?: number | null } | null;
+  zivy?: { denni_limit?: number | null; denni_pouzito?: number | null; denni_zbyva?: number | null; kredit_zbyva?: number | null } | null;
+  aplikace?: { dnes: number; max: number | null };
+}
+export interface AiForm { llm_poskytovatel?: string; llm_klic?: string; llm_model?: string; llm_url?: string; llm_ucet?: string; ai_denni_limit?: number | string | null }
 
 // ---------------- onboarding
 export interface Otazka { id: string; category: string; question_text: string; quick_replies: string[]; allow_multiple: boolean }
@@ -183,15 +193,18 @@ export interface Profil2 {
   keywords: string[]; negative_keywords: string[]; regions_nuts3: string[];
   max_distance_km: number | null; cooperation_model: string | null;
   budget: { min_czk: number | null; max_czk: number | null; vzmr_interest: boolean };
-  min_prep_days: number; qualifications: string[]; consortium_ok: boolean; dealbreakers: string[]; obrat_czk?: number | null;
+  min_prep_days: number; qualifications: string[]; consortium_ok: boolean; dealbreakers: string[]; obrat_czk?: number | null; cpv_zdroj?: string;
   whitelist_procurer_icos: string[]; blacklist_procurer_icos: string[];
   sidlo?: Sidlo;
 }
-export interface Kriterium { klic: string; otazka: string; odpoved: string; skore: number | null; vaha: number; km?: number; rucne?: boolean; uplynula?: boolean }
+export interface Kriterium { klic: string; otazka: string; odpoved: string; skore: number | null; vaha: number; body?: number | null; km?: number; rucne?: boolean; uplynula?: boolean }
+export interface Srazka { duvod: string; zavaznost: number; klic: string }
+export interface Odkaz { nazev: string; url: string }
 export interface PolozkaZpravodaje {
   id: string; nazev: string; zadavatel: string | null; zadavatel_ico: string | null; kraj: string | null; hodnota: number | null;
   datum: string | null; lhuta: string; otevrena: boolean; url: string | null; segment: string;
-  skore: number; verdikt: string; ko: string[]; kriteria: Kriterium[];
+  skore: number; verdikt: string; ko: string[]; kriteria: Kriterium[]; zaklad?: number; srazky?: Srazka[];
+  odkazy?: Odkaz[]; nipez_id?: string | null; nen_cislo?: string | null; vvz_cislo?: string | null;
 }
 export interface Zpravodaj { od: string | null; do: string | null; poznamka: string | null; kandidatu: number; doporuceno?: number; polozky: PolozkaZpravodaje[] }
 export interface OnbStav { ico: string; recon: Recon | null; faze1: Faze1 | null; odpovedi: Record<string, Odpoved> | null; profil: Profil2 | null; zpravodaj?: Zpravodaj; upraveno: string }
@@ -269,6 +282,7 @@ export const api = {
   onbUlozProfil: (ico: string, profil: Profil2) =>
     post<{ company_profile: Profil2; zpravodaj: Zpravodaj }>(`/api/onboarding/${encodeURIComponent(ico)}/profil`, { profil }),
   aiModely: (body: AiForm) => post<{ ok: boolean; modely?: string[]; chyba?: string }>("/api/ai/modely", body),
+  aiLimity: () => post<AiLimity>("/api/ai/limity", {}),
   aiTest: (body: AiForm) => post<{ ok: boolean; odpoved?: string; chyba?: string; poskytovatel?: string; model?: string }>("/api/ai/test", body),
   ulozNastaveni: async (body: AiForm & { obsidian_vault?: string; exa_api_key?: string }) => {
     const r = await fetch("/api/nastaveni", { method: "POST", headers: hdr(), body: JSON.stringify(body) });

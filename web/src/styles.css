@@ -247,3 +247,4 @@ textarea.field { resize: vertical; line-height: 1.5; }
 .skore-kruh.neutral { background: var(--surface-2); color: var(--text-secondary); }
 .skore-kruh.bad { background: var(--bad-bg); color: var(--bad); }
 @media (max-width: 600px) { .zp-head { grid-template-columns: 40px minmax(0, 1fr); } .zp-head .badge { display: none; } .zp-title { white-space: normal; } }
+.warn-text { color: var(--warn); margin-top: 4px; }
