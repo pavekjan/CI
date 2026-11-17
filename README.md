@@ -215,6 +215,11 @@ Práce je rozdělená na dvě části, protože server se zakázkami (ISVZ) odpo
 zakázky z ISVZ za 12 měsíců, potom Registr smluv za 3 roky a nahraje databázi pro online verzi. Na nic se
 neptá, trvá zhruba 3–6 hodin. Zakázky se zpracovávají na více jádrech procesoru najednou (asi 3–6× rychleji
 než dřív). Když se přeruší, spusťte znovu, hotové měsíce se přeskočí.
+Během běhu nenechá počítač usnout a celý výpis ukládá do `data\logy\`. Kam běh došel (a jestli se počítač
+v noci restartoval, třeba kvůli aktualizacím Windows) ukáže dvojklik na **`stav_behu.bat`**.
+Velká databáze se do větve `data` nahrává rozdělená na části po 95 MB (`tenderscope.db.gz`, `.2`, `.3` …),
+protože GitHub nebere soubory nad 100 MB. Online verze i GitHub Actions si části samy spojí. Díky tomu se
+už nic nemaže kvůli velikosti (dřív se při překročení 95 MB zkracoval Registr smluv i zakázky).
 
 **1. Registr smluv – automaticky každé ráno na GitHubu (Actions → Aktualizace dat).** Nic nemusíte mít
 zapnuté. Historie za 3 roky se doplňuje po částech (asi 8 měsíců za jeden běh), takže je kompletní zhruba

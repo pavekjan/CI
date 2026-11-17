@@ -56,7 +56,39 @@ def _pokrok(path):
         return -1
 
 
+def zapis_log():
+    """Kazdy radek vypisu se ulozi i do souboru data/logy/aktualizace_<datum>.log, aby slo i po zavreni okna
+    (restart pocitace, aktualizace Windows) zjistit, kam beh dosel."""
+    from datetime import datetime
+    from ts.util import LOG_SINKS
+    slozka = os.path.join(ROOT, "data", "logy")
+    os.makedirs(slozka, exist_ok=True)
+    cesta = os.path.join(slozka, f"aktualizace_{datetime.now():%Y-%m-%d_%H%M}.log")
+    soubor = open(cesta, "a", encoding="utf-8")  # noqa: SIM115 - otevreny po celou dobu behu
+
+    def sink(radek):
+        soubor.write(radek + "\n")
+        soubor.flush()
+    LOG_SINKS.append(sink)
+    print(f"Prubeh se uklada i do {cesta}")
+    return cesta
+
+
+def nespat():
+    """Windows: behem behu nedovolit pocitaci usnout (bez prav spravce, plati jen dokud skript bezi).
+    Restart kvuli aktualizacim Windows tim zabranit nejde."""
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        ctypes.windll.kernel32.SetThreadExecutionState(0x80000000 | 0x00000001)  # ES_CONTINUOUS | ES_SYSTEM_REQUIRED
+    except Exception:  # nosec B110 - jen pohodli, beh funguje i bez toho
+        pass
+
+
 def main():
+    zapis_log()
+    nespat()
     rezim = ("rychle" if "--rychle" in sys.argv else "plny" if "--plny" in sys.argv
              else "finalni" if "--vse-najednou" in sys.argv
              else "zakazky" if "--jen-zakazky" in sys.argv else "registr" if "--jen-registr" in sys.argv else "denni")

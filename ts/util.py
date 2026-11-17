@@ -225,23 +225,42 @@ def download(url, dest, max_age_hours=None, agent="Scout"):
         if max_age_hours is None or age_h < max_age_hours:
             log(agent, f"cache: {os.path.basename(dest)}")
             return dest
-    r = http_get(url, stream=True, timeout=120)
-    if r.status_code == 404:
-        return None
-    if r.status_code != 200:
-        raise RuntimeError(f"{url} vratil HTTP {r.status_code}")
-    total = int(r.headers.get("Content-Length") or 0)
     tmp = dest + ".part"
-    got = 0
+    got = total = 0
     last_print = 0
-    with open(tmp, "wb") as f:
-        for chunk in r.iter_content(chunk_size=1 << 20):
-            f.write(chunk)
-            got += len(chunk)
-            if got - last_print > 25 << 20:
-                last_print = got
-                pct = f" ({100 * got // total} %)" if total else ""
-                log(agent, f"  stahuji {os.path.basename(dest)}: {got >> 20} MB{pct}")
+    pokus = 0
+    while True:
+        # preruseni spojeni (vypadek site, usnuti pocitace) -> navazat tam, kde stahovani skoncilo (HTTP Range)
+        hlav = {"Range": f"bytes={got}-"} if got else None
+        try:
+            r = http_get(url, stream=True, timeout=120, headers=hlav)
+            if r.status_code == 404:
+                return None
+            if got and r.status_code == 200:
+                got = 0  # server neumi navazat -> znovu od zacatku
+            elif r.status_code not in (200, 206):
+                raise RuntimeError(f"{url} vratil HTTP {r.status_code}")
+            if not got:
+                total = int(r.headers.get("Content-Length") or 0)
+            with open(tmp, "ab" if got else "wb") as f:
+                for chunk in r.iter_content(chunk_size=1 << 20):
+                    f.write(chunk)
+                    got += len(chunk)
+                    if got - last_print > 25 << 20:
+                        last_print = got
+                        pct = f" ({100 * got // total} %)" if total else ""
+                        log(agent, f"  stahuji {os.path.basename(dest)}: {got >> 20} MB{pct}")
+            if total and got < total:
+                raise IOError(f"spojeni skoncilo po {got >> 20} z {total >> 20} MB")
+            break
+        except (requests.RequestException, IOError, RuntimeError) as e:
+            if isinstance(e, RuntimeError) and not got:
+                raise  # server vubec neodpovida (napr. ISVZ z GitHubu) -> nezdrzovat dalsimi pokusy
+            pokus += 1
+            if pokus > 6:
+                raise RuntimeError(f"Nepodarilo se stahnout {url}: {e}") from e
+            log(agent, f"  stahovani {os.path.basename(dest)} prerusene ({str(e)[:80]}), navazuji za {10 * pokus} s")
+            time.sleep(10 * pokus)
     os.replace(tmp, dest)
     log(agent, f"stazeno {os.path.basename(dest)} ({got >> 20} MB)")
     return dest

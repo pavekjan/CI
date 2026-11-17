@@ -759,7 +759,7 @@ def spust_aktualizaci(rezim):
     return True
 
 
-def stahni_databazi(url, cil, max_bajtu=500_000_000):
+def stahni_databazi(url, cil, max_bajtu=900_000_000):
     """Stahne zabalenou databazi (tenderscope.db.gz) z adresy v TS_DB_URL. Jen https na verejny server (SSRF),
     velikost omezena, a pred pouzitim se overi, ze jde opravdu o databazi TenderScope. Pri chybe se nic nezmeni."""
     import gzip
@@ -769,16 +769,24 @@ def stahni_databazi(url, cil, max_bajtu=500_000_000):
     try:
         url = bezpecnost.over_api_url(url, True)
         print("Stahuji aktualni databazi z TS_DB_URL ...")
-        with requests.get(url, stream=True, timeout=60, allow_redirects=False) as r:
-            if r.status_code != 200:
-                raise RuntimeError(f"HTTP {r.status_code}")
-            got = 0
-            with open(tmp_gz, "wb") as f:
-                for chunk in r.iter_content(1 << 20):
-                    got += len(chunk)
-                    if got > max_bajtu:
-                        raise RuntimeError("soubor je prilis velky")
-                    f.write(chunk)
+        # velka databaze je rozdelena na casti (GitHub bere soubory max. 100 MB): tenderscope.db.gz, .2, .3 ...
+        # casti se jen spoji za sebe; kdyz dalsi cast neexistuje (404), je hotovo
+        got = 0
+        with open(tmp_gz, "wb") as f:
+            for cast in range(1, 21):
+                with requests.get(url if cast == 1 else f"{url}.{cast}", stream=True, timeout=60,
+                                  allow_redirects=False) as r:
+                    if cast > 1 and r.status_code == 404:
+                        break
+                    if r.status_code != 200:
+                        raise RuntimeError(f"HTTP {r.status_code}")
+                    for chunk in r.iter_content(1 << 20):
+                        got += len(chunk)
+                        if got > max_bajtu:
+                            raise RuntimeError("soubor je prilis velky")
+                        f.write(chunk)
+                if cast > 1:
+                    print(f"  cast {cast} stazena")
         got = 0
         with gzip.open(tmp_gz, "rb") as g, open(tmp_db, "wb") as f:
             while True:
@@ -834,8 +842,14 @@ def main():
         import gzip
         import shutil
         print("Rozbaluji predpripravenou databazi z predpripravena_db/ ...")
-        with gzip.open(pripravena, "rb") as g, open(STATE["db"] + ".tmp", "wb") as f:
+        casti = [pripravena] + [f"{pripravena}.{i}" for i in range(2, 21) if os.path.exists(f"{pripravena}.{i}")]
+        with open(STATE["db"] + ".gz.tmp", "wb") as f:
+            for c in casti:
+                with open(c, "rb") as g:
+                    shutil.copyfileobj(g, f)
+        with gzip.open(STATE["db"] + ".gz.tmp", "rb") as g, open(STATE["db"] + ".tmp", "wb") as f:
             shutil.copyfileobj(g, f)
+        os.remove(STATE["db"] + ".gz.tmp")
         os.replace(STATE["db"] + ".tmp", STATE["db"])
     con = connect(STATE["db"])
     if con.execute("SELECT COUNT(*) FROM dodavatele").fetchone()[0] == 0 and con.execute("SELECT COUNT(*) FROM vitezove").fetchone()[0] > 0:

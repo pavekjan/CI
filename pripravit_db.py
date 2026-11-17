@@ -19,6 +19,10 @@ CIL_DIR = os.path.join(ROOT, "predpripravena_db")
 CIL = os.path.join(CIL_DIR, "tenderscope.db.gz")
 TMP = os.path.join(ROOT, "data", "_online_kopie.db")
 LIMIT_MB = 24  # GitHub pres prohlizec bere soubory max. 25 MB (git push az 100 MB, viz --limit)
+# --limit (vetev "data"): databaze se rozdeli na casti po LIMIT_MB a zmensuje se az nad CELKEM_MB.
+# Vystup jde do data/nahrani (git ho ignoruje), aby se velke soubory omylem necommitovaly do hlavni vetve.
+CELKEM_MB = 450
+NAHRANI = os.path.join(ROOT, "data", "nahrani")
 
 
 def gz_velikost(path):
@@ -35,10 +39,35 @@ def smaz_stare(con, mesicu):
     con.execute("DELETE FROM priznaky WHERE objekt_typ='zakazka' AND objekt_id NOT IN (SELECT id FROM zakazky)")
 
 
+def rozdel(cesta, cast_mb):
+    """Rozdeli soubor na casti: cesta (1. cast), cesta.2, cesta.3 ... Spojenim za sebe vznikne puvodni soubor."""
+    velikost = int(cast_mb * 1e6)
+    for i in range(2, 21):
+        if os.path.exists(f"{cesta}.{i}"):
+            os.remove(f"{cesta}.{i}")
+    with open(cesta, "rb") as f:
+        f.seek(velikost)
+        i = 2
+        while True:
+            blok = f.read(velikost)
+            if not blok:
+                break
+            with open(f"{cesta}.{i}", "wb") as g:
+                g.write(blok)
+            i += 1
+    with open(cesta, "r+b") as f:
+        f.truncate(min(velikost, os.path.getsize(cesta)))
+    return i - 1
+
+
 def main():
-    global LIMIT_MB
+    global LIMIT_MB, CIL, CIL_DIR
+    casti_mb = None
     if "--limit" in sys.argv:
-        LIMIT_MB = max(1, min(95, int(sys.argv[sys.argv.index("--limit") + 1])))
+        casti_mb = max(1, min(95, int(sys.argv[sys.argv.index("--limit") + 1])))
+        LIMIT_MB = CELKEM_MB
+        CIL_DIR = NAHRANI
+        CIL = os.path.join(CIL_DIR, "tenderscope.db.gz")
     global ZDROJ
     if "--db" in sys.argv:
         ZDROJ = os.path.abspath(sys.argv[sys.argv.index("--db") + 1])
@@ -93,6 +122,10 @@ def main():
         os.remove(CIL)
         print(f"Ani zmensena databaze se nevesla do {LIMIT_MB} MB. Online verze si data stahne sama po startu.")
         return 1
+    if casti_mb:
+        n = rozdel(CIL, casti_mb)
+        print(f"\nHotovo: {CIL} ({mb:.1f} MB, {popis}, {n} {'cast' if n == 1 else 'casti'}). Nahrajte nahrat_data.py.")
+        return 0
     print(f"\nHotovo: predpripravena_db/tenderscope.db.gz ({mb:.1f} MB, {popis}).")
     print("Nahrajte tento soubor na GitHub spolu s aplikaci (slozka predpripravena_db).")
     return 0
