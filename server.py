@@ -12,7 +12,8 @@ Frontend (TypeScript/React) je predkompilovany ve web/dist. API:
     GET  /api/trh?segment=...      prehled trhu
     POST /api/aktualizovat         {"rezim": "rychle" | "plny"} - spusti agenty na pozadi
     GET  /api/beh                  prubeh aktualizace (log)
-    POST /api/onboarding/start     {"ico", "web"} - Recon + Faze 1 (4 otazky)
+    GET  /api/najdi_firmu?q=       IČO, nazev nebo web -> kandidati (lokalni DB, ARES, IČO z webu)
+    POST /api/onboarding/start     {"ico", "web"} - Recon + CI analyza + Faze 1 (6 otazek)
     POST /api/onboarding/dokoncit  {"ico", "odpovedi"} - Faze 2 (company_profile) + Day-0 zpravodaj
     GET  /api/onboarding           seznam profilu;  GET /api/onboarding/<ico> ulozeny stav + zpravodaj
     POST /api/onboarding/<ico>/profil  {"profil"} - ulozit upraveny profil, prepocitat zpravodaj
@@ -36,7 +37,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ROOT)
 
-from ts import api, bezpecnost, onboarding, scout, verifier  # noqa: E402
+from ts import api, bezpecnost, najdi, onboarding, scout, verifier  # noqa: E402
 from ts.db import connect  # noqa: E402
 from ts.util import DATA_DIR, LOCAL_CONFIG, LOG_SINKS, load_config, log, nacti_env_soubor  # noqa: E402
 
@@ -638,6 +639,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({**api.stav(con, STATE["demo"]), "aktualizace_bezi": JOB["bezi"], "verejne": SEC["verejne"]})
             if u.path == "/api/hledat":
                 return self._json(api.hledat(con, arg("q", 100), None if STATE["demo"] else STATE["cfg"]["zdroje"]["ares_base"]))
+            if u.path == "/api/najdi_firmu":
+                self._drahe()  # muze stahovat web firmy a volat ARES
+                return self._json(najdi.najdi(con, arg("q", 200), STATE["cfg"]["zdroje"]["ares_base"], online=not STATE["demo"]))
             if u.path.startswith("/api/graf/"):
                 return self._json(api.graf(con, _ico_z_cesty(u.path), STATE["cfg"]))
             if u.path.startswith("/api/firma/"):
@@ -721,7 +725,10 @@ class Handler(BaseHTTPRequestHandler):
                 if u.path == "/api/onboarding/start":
                     self._drahe()
                     ico = bezpecnost.ico(body.get("ico"))
-                    web = bezpecnost.over_url(body.get("web")) if (body.get("web") and not STATE["demo"]) else None
+                    try:  # nedostupny web nesmi zastavit resersi - pokracuje se bez nej
+                        web = bezpecnost.over_url(body.get("web")) if (body.get("web") and not STATE["demo"]) else None
+                    except bezpecnost.ChybaVstupu:
+                        web = None
                     return self._json(onboarding.start(con, cfg_pro(admin), ico, web, online=not STATE["demo"],
                                                        vlastnik=vlastnik, llm_povolit=llm_vezmi))
                 if u.path == "/api/onboarding/dokoncit":
@@ -759,7 +766,23 @@ def spust_aktualizaci(rezim):
     return True
 
 
-def stahni_databazi(url, cil, max_bajtu=900_000_000):
+def stahni_databazi(url, cil, max_bajtu=900_000_000, pokusu=4, pauza=90):
+    """Stahne databazi; kdyz se nepovede (napr. stahovani behem nahravani nove verze - casti z ruznych verzi
+    nejdou rozbalit, GitHub je par minut drzi v cache), zkusi to za chvili znovu."""
+    import time
+    for i in range(pokusu):
+        v = _stahni_databazi(url, cil, max_bajtu)
+        if v:
+            return True
+        if v is False:  # chyba, kterou opakovani nespravi (adresa, 404, prilis velky soubor)
+            return False
+        if i < pokusu - 1:
+            print(f"Zkusim to znovu za {pauza} s ({i + 2}. pokus z {pokusu}) ...")
+            time.sleep(pauza)
+    return False
+
+
+def _stahni_databazi(url, cil, max_bajtu=900_000_000):
     """Stahne zabalenou databazi (tenderscope.db.gz) z adresy v TS_DB_URL. Jen https na verejny server (SSRF),
     velikost omezena, a pred pouzitim se overi, ze jde opravdu o databazi TenderScope. Pri chybe se nic nezmeni."""
     import gzip
@@ -805,7 +828,10 @@ def stahni_databazi(url, cil, max_bajtu=900_000_000):
         return True
     except Exception as e:  # zadna databaze ke stazeni (napr. vetev data jeste neexistuje) -> pokracujeme bez ni
         print(f"Databazi z TS_DB_URL se nepodarilo pouzit: {str(e)[:200]}")
-        return False
+        import zlib
+        # poskozeny/neuplny soubor (casti z ruznych verzi, prerusene stahovani) -> ma smysl to zkusit znovu
+        poskozeny = isinstance(e, (EOFError, OSError, zlib.error, sqlite3.DatabaseError, requests.RequestException))
+        return None if poskozeny and "prilis velk" not in str(e) else False
     finally:
         for t in (tmp_gz, tmp_db):
             if os.path.exists(t):

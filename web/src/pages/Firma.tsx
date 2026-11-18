@@ -136,7 +136,8 @@ export default function Firma({ ico, prazdnaDb }: { ico: string; prazdnaDb?: boo
           <div className="callout info small">
             <b>Proč jsou čísla jiná než na Hlídači státu?</b>{" "}
             <b>Soutěže (RVZ)</b>{p.obdobi?.rvz_od ? <> za {mesic(p.obdobi.rvz_od)} – {mesic(p.obdobi.rvz_do!)}</> : null}: zakázky z věstníku
-            a NEN se známými účastníky. <b>Registr smluv</b>{p.obdobi?.rs_od ? <> za {mesic(p.obdobi.rs_od)} – {mesic(p.obdobi.rs_do!)}</> : null}: zveřejněné
+            a NEN, které se v tom období zveřejnily nebo změnily (proto i starší velké stavby, u kterých se v té době
+            měnila smlouva). <b>Registr smluv</b>{p.obdobi?.rs_od ? <> za {mesic(p.obdobi.rs_od)} – {mesic(p.obdobi.rs_do!)}</> : null}: zveřejněné
             smlouvy nad 50 tis. Kč, tedy i malé zakázky a objednávky. Hlídač státu ukazuje <b>celou historii od roku 2016</b> a navíc
             zakázky malého rozsahu z profilů zadavatelů, proto má vyšší čísla.
             {p.hlidac && <>
@@ -229,7 +230,7 @@ export default function Firma({ ico, prazdnaDb }: { ico: string; prazdnaDb?: boo
                 items={p.segmenty}
                 value={(s) => s.objem}
                 label={(s) => s.segment}
-                right={(s) => <>{kc(s.objem)} · <b>{pct(s.podil)}</b> · {s.poradi ?? "–"}./{s.dodavatelu}</>}
+                right={(s) => <>{kc(s.objem)} · <b>{s.podil != null && s.podil > 0 && s.podil < 0.0001 ? "< 0,01 %" : pct(s.podil, s.podil != null && s.podil < 0.01 ? 2 : s.podil != null && s.podil < 0.1 ? 1 : 0)}</b> · {s.poradi ?? "–"}./{s.dodavatelu}</>}
               />
             </Card>
             <Card title="Největší zákazníci" sub="Zadavatelé podle objemu vyhraných zakázek.">

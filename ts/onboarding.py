@@ -2,7 +2,7 @@
 
 1. Recon agent      - z IČO (a volitelne webu) potichu sesbira: ARES, historii firmy v databazi zakazek
                       (vyhry, ucasti, CPV, zadavatele, kraje), Registr smluv, volitelne Hlidac statu, text webu.
-2. Onboarding agent - Faze 1: hypoteza + 4 cilene otazky s quick_replies (JSON needs_clarification).
+2. Onboarding agent - Faze 1: hypoteza + 6 cilenych otazek podlozenych daty (CI analyza) s quick_replies (JSON needs_clarification).
                       Faze 2: finalni company_profile JSON (CPV, negativni slova, NUTS 3, kvalifikace...).
                       S Claude API klicem rozhoduje model (prompt v ts/prompty/onboarding_system.md),
                       bez klice pravidlovy zaloznik se stejnym vystupnim formatem.
@@ -141,6 +141,11 @@ def misto_zakazky(z):
 STOP = set("""a i k o s u v z na do od po za ze se je to ve pro pri nebo jako ktery ktera ktere jsou byl byla bylo
 bude jeho jejich nas vas tak take uz jen pouze jiz spol sro s.r.o a.s as cz www http https dodavka dodavky sluzby
 sluzba smlouva smlouvy smlouvu prace zakazka zakazky verejna verejne mesto obec kraj krajsky urad ii iii iv the and for with""".split())
+# obecna slova ze smluv a nazvu zakazek, ktera nic nerikaji o oboru (pro klicova slova profilu)
+STOP_KW = STOP | set("""dodatek dodatku dodatkem zmena zmeny zmenu cislo cisla plneni terminu termin etapa etapy etape
+ramcova ramcove ramcovou dohoda dohody dohodu objednavka objednavky kupni smlouve uzavreni uzavrene castka ceny cena
+celkem zaklade ucelem akce akci projekt projektu stavba stavby casti cast lotu cislem ostatni dalsi vcetne mesic
+leden unor brezen duben kveten cerven cervenec srpen zari rijen listopad prosinec roku rok""".split())
 
 
 def tokeny(text):
@@ -327,6 +332,161 @@ def _historie(con, ico):
     }
 
 
+# ------------------------------------------------------------------ CI analyza (podklad pro otazky)
+def _tvar(n, jedna, dve, pet):
+    """Cesky plural: 1 zakazka, 2 zakazky, 5 zakazek."""
+    return f"{n} " + (jedna if n == 1 else dve if 2 <= n <= 4 else pet)
+
+
+def _bez_tecky(t):
+    return (t or "").rstrip(".")
+
+
+def _je_ico(x):
+    return bool(x) and bool(re.fullmatch(r"\d{8}", str(x)))
+
+
+def _ci(con, ico, hist):
+    """Konkurencni zpravodajstvi z dat (zadne odhady modelu): souboje s konkurenty, lidri segmentu,
+    koncentrace zakazniku, bila mista u stavajicich zakazniku a dynamika. Kazde zjisteni nese zdroj a jistotu."""
+    from .api import _nazvy, trh_segmenty
+    out = {"souboje": [], "lidri": [], "koncentrace": None, "bila_mista": [], "trend": None, "zjisteni": []}
+    moje = {r[0] for r in con.execute("SELECT zakazka_id FROM vitezove WHERE dodavatel_ico=?", (ico,))}
+    vse = moje | {r[0] for r in con.execute("SELECT zakazka_id FROM ucastnici WHERE dodavatel_ico=?", (ico,))}
+
+    # 1) prime souboje: kdo se objevil ve stejnych soutezich (jako ucastnik nebo vitez)
+    if vse:
+        con.execute("CREATE TEMP TABLE IF NOT EXISTS t_ci (id TEXT PRIMARY KEY)")
+        con.execute("DELETE FROM t_ci")
+        con.executemany("INSERT OR IGNORE INTO t_ci VALUES (?)", [(i,) for i in vse])
+        vitez = defaultdict(set)
+        for zid, d in con.execute("SELECT zakazka_id, dodavatel_ico FROM vitezove WHERE zakazka_id IN (SELECT id FROM t_ci)"):
+            vitez[zid].add(d)
+        jini = defaultdict(set)
+        for tab in ("ucastnici", "vitezove"):
+            # bezpecnost: nazev tabulky je pevna konstanta z kodu, ne vstup
+            for zid, d in con.execute(f"SELECT zakazka_id, dodavatel_ico FROM {tab} WHERE zakazka_id IN (SELECT id FROM t_ci)"):  # nosec B608
+                if _je_ico(d) and d != ico:
+                    jini[zid].add(d)
+        h2h = defaultdict(lambda: [0, 0, 0])  # stretu, my vyhra, oni vyhra
+        for zid, os_ in jini.items():
+            for o in os_:
+                h2h[o][0] += 1
+                h2h[o][1] += ico in vitez[zid]
+                h2h[o][2] += o in vitez[zid]
+        top = sorted(h2h.items(), key=lambda kv: (-kv[1][0], -kv[1][2]))[:8]
+        nazvy = _nazvy(con, [k for k, _ in top])
+        out["souboje"] = [{"ico": k, "nazev": nazvy.get(k) or k, "stretu": v[0], "my_vyhra": v[1], "oni_vyhra": v[2]}
+                          for k, v in top if v[0] >= 1]
+
+    # 2) lidri hlavnich segmentu (i kdyz se s firmou primo nepotkali)
+    seg = [x["segment"] for x in hist["segmenty"][:2]]
+    ts_ = trh_segmenty(con)["seg"]
+    lid = defaultdict(lambda: [0.0, 0, None])
+    for g in seg:
+        for k, v, n in (ts_.get(g) or {}).get("top", [])[:10]:
+            if _je_ico(k) and k != ico:
+                lid[k][0] += v
+                lid[k][1] += n
+                lid[k][2] = lid[k][2] or g
+    top_l = sorted(lid.items(), key=lambda kv: -kv[1][0])[:6]
+    nazvy = _nazvy(con, [k for k, _ in top_l])
+    out["lidri"] = [{"ico": k, "nazev": nazvy.get(k) or k, "objem": v[0], "vyhry": v[1], "segment": v[2]} for k, v in top_l]
+
+    # 3) koncentrace zakazniku: vyhry v soutezich + odberatele z Registru smluv
+    obj = defaultdict(float)
+    nazvy_z = {}
+    for zi, zn, c in con.execute("""SELECT z.zadavatel_ico, z.zadavatel_nazev, v.cena_bez_dph FROM vitezove v
+                                    JOIN zakazky z ON z.id=v.zakazka_id WHERE v.dodavatel_ico=?""", (ico,)):
+        if zi:
+            obj[zi] += c or 0
+            nazvy_z.setdefault(zi, zn)
+    for zi, h in con.execute("SELECT zadavatel_ico, SUM(hodnota) FROM smlouvy_odberatele WHERE ico=? GROUP BY zadavatel_ico", (ico,)):
+        if zi:
+            obj[zi] += h or 0
+    tot = sum(obj.values())
+    if obj and tot > 0:
+        poradi = sorted(obj.items(), key=lambda kv: -kv[1])
+        chybi = [k for k, _ in poradi[:3] if not nazvy_z.get(k)]
+        if chybi:
+            for r in con.execute(f"SELECT ico, nazev FROM subjekty WHERE ico IN ({','.join('?' * len(chybi))})", chybi):  # nosec B608
+                nazvy_z[r[0]] = r[1]
+        podil = poradi[0][1] / tot
+        hhi = sum((v / tot) ** 2 for v in obj.values())
+        out["koncentrace"] = {"zakazniku": len(obj), "top_ico": poradi[0][0], "top_nazev": nazvy_z.get(poradi[0][0]) or poradi[0][0],
+                              "top_podil": podil, "top3_podil": sum(v for _, v in poradi[:3]) / tot, "hhi": hhi}
+
+    # 4) bila mista: segmenty, ktere nakupuji vasi zakaznici a kde u nich vyhravaji vasi konkurenti, ale vy ne
+    #    (konkurent = primy soupeř, jinak lidr vaseho segmentu). Tim jde o skutecne "sousedni" obory, ne o cokoli,
+    #    co velky zakaznik koupi (armada, nemocnice...).
+    klienti = [k for k, _ in sorted(obj.items(), key=lambda kv: -kv[1])[:25]]
+    rivalove = [x["ico"] for x in out["souboje"]] + [x["ico"] for x in out["lidri"]]
+    if klienti and rivalove:
+        moje_seg = {x["segment"] for x in hist["segmenty"]}
+        bm = defaultdict(lambda: {"objem": 0.0, "pocet": 0, "zakazniku": set(), "vitez": Counter()})
+        od = (date.today() - timedelta(days=3 * 365)).isoformat()
+        for cpv, zi, d, c in con.execute(
+                f"""SELECT z.cpv_hlavni, z.zadavatel_ico, v.dodavatel_ico, v.cena_bez_dph FROM vitezove v JOIN zakazky z ON z.id=v.zakazka_id
+                    WHERE v.dodavatel_ico IN ({','.join('?' * len(rivalove))})
+                      AND z.zadavatel_ico IN ({','.join('?' * len(klienti))}) AND z.datum_zahajeni >= ?""",  # nosec B608 - jen otazniky
+                rivalove + klienti + [od]):
+            g = cpv_group(cpv)
+            if g in moje_seg or g == "neuvedeno" or not (c and c > 0):
+                continue
+            b = bm[g]
+            b["objem"] += c
+            b["pocet"] += 1
+            b["zakazniku"].add(zi)
+            b["vitez"][d] += c
+        # aspon 2 zakazky, poradi podle poctu zakazniku a objemu
+        nej = sorted(((g, b) for g, b in bm.items() if b["pocet"] >= 2),
+                     key=lambda kv: (-len(kv[1]["zakazniku"]), -kv[1]["objem"]))[:5]
+        nazvy = _nazvy(con, [b["vitez"].most_common(1)[0][0] for _, b in nej])
+        out["bila_mista"] = [{"segment": g, "objem": b["objem"], "pocet": b["pocet"], "zakazniku": len(b["zakazniku"]),
+                              "lidr": nazvy.get(b["vitez"].most_common(1)[0][0])} for g, b in nej]
+
+    # 5) dynamika vyher: poslednich 12 mesicu dat vs. predchozich 12
+    max_d = con.execute("SELECT MAX(datum_zahajeni) FROM zakazky WHERE datum_zahajeni <= ?", (date.today().isoformat(),)).fetchone()[0]
+    if max_d and moje:
+        ref = date.fromisoformat(max_d[:10])
+        a, b = (ref - timedelta(days=365)).isoformat(), (ref - timedelta(days=730)).isoformat()
+        r = con.execute("""SELECT SUM(z.datum_zahajeni > ?), SUM(z.datum_zahajeni > ? AND z.datum_zahajeni <= ?)
+                           FROM vitezove v JOIN zakazky z ON z.id=v.zakazka_id WHERE v.dodavatel_ico=?""", (a, b, a, ico)).fetchone()
+        out["trend"] = {"posl12": r[0] or 0, "pred12": r[1] or 0, "do": ref.isoformat()}
+
+    # 6) klicova zjisteni (zdroj + hodnoceni duveryhodnosti podle Admiralty kodu + jistota zaveru)
+    zj = out["zjisteni"]
+    n_s = len(out["souboje"])
+    if out["souboje"]:
+        s0 = out["souboje"][0]
+        zj.append({"text": f"Nejčastější přímý soupeř: {s0['nazev']} – potkali jste se " + ("v 1 soutěži" if s0["stretu"] == 1 else f"v {s0['stretu']} soutěžích") + ", "
+                           f"vy jste vyhráli {s0['my_vyhra']}×, oni {s0['oni_vyhra']}×.",
+                   "zdroj": "ISVZ (účastníci soutěží)", "rating": "A1", "jistota": "vysoká" if s0["stretu"] >= 3 else "střední"})
+    elif vse:
+        zj.append({"text": "U vašich soutěží zdroj neuvádí ostatní účastníky – přímé souboje zatím nelze určit, "
+                           "konkurenty odvozuji od lídrů vašich segmentů.", "zdroj": "ISVZ", "rating": "A1", "jistota": "nízká"})
+    k = out["koncentrace"]
+    if k and k["zakazniku"] >= 2:
+        zj.append({"text": f"Největší zákazník {k['top_nazev']} tvoří {k['top_podil'] * 100:.0f} % vašich veřejných tržeb "
+                           f"(top 3 = {k['top3_podil'] * 100:.0f} %, celkem {k['zakazniku']} zákazníků)"
+                           + (" – vysoká závislost na jednom odběrateli." if k["top_podil"] >= 0.4 else "."),
+                   "zdroj": "ISVZ + Registr smluv", "rating": "A1", "jistota": "vysoká"})
+    if out["bila_mista"]:
+        b0 = out["bila_mista"][0]
+        zj.append({"text": f"Bílé místo: u {_tvar(b0['zakazniku'], 'vašeho zákazníka', 'vašich zákazníků', 'vašich zákazníků')} vyhrávají "
+                           f"vaši konkurenti i v segmentu {b0['segment']} ({_tvar(b0['pocet'], 'zakázka', 'zakázky', 'zakázek')} "
+                           f"za {kc(b0['objem'])} za 3 roky" + (f", hlavně {b0['lidr']}" if b0["lidr"] else "")
+                           + ") – vy tam zatím nedodáváte.",
+                   "zdroj": "ISVZ (vítězové u vašich zákazníků)", "rating": "A1", "jistota": "střední"})
+    t = out["trend"]
+    if t and (t["posl12"] or t["pred12"]):
+        zm = "roste" if t["posl12"] > t["pred12"] * 1.2 else "klesá" if t["posl12"] < t["pred12"] * 0.8 else "je stabilní"
+        zj.append({"text": f"Počet vyhraných soutěží {zm}: {t['posl12']} za posledních 12 měsíců dat vs. {t['pred12']} v předchozích 12.",
+                   "zdroj": "ISVZ", "rating": "A1", "jistota": "střední" if t["posl12"] + t["pred12"] >= 5 else "nízká"})
+    out["souboje_n"] = n_s
+    return out
+
+
 def recon(con, cfg, ico, web_url=None, online=True):
     ico = clean_ico(ico)
     if not ico:
@@ -337,6 +497,7 @@ def recon(con, cfg, ico, web_url=None, online=True):
         f_hl = ex.submit(_hlidac_smlouvy, cfg, ico) if online else None
         ares = _ares_cached(con, cfg["zdroje"]["ares_base"], ico, online)  # SQLite jen z hlavniho vlakna
         hist = _historie(con, ico)
+        ci = _ci(con, ico, hist)
         web = f_web.result() if f_web else None
         hlidac = f_hl.result() if f_hl else None
     nazev = (ares or {}).get("nazev") or (con.execute("SELECT nazev FROM dodavatele WHERE ico=?", (ico,)).fetchone() or [None])[0]
@@ -349,7 +510,7 @@ def recon(con, cfg, ico, web_url=None, online=True):
         zdroje.append({"id": "WEB", "nazev": "Web firmy", "url": web.get("url"), "rating": "C3", "ok": "chyba" not in web})
     log(A, f"Recon {ico}: {nazev} – {hist['vyher']} výher, {hist['registr_smluv']['pocet']} smluv RS ({(datetime.now() - t0).total_seconds():.1f} s)")
     return {"ico": ico, "nazev": nazev or ico, "ares": ares, "sidlo": sidlo_firmy(ares), "historie": hist,
-            "hlidac_statu": hlidac, "web": web, "zdroje": zdroje}
+            "hlidac_statu": hlidac, "web": web, "zdroje": zdroje, "ci": ci}
 
 
 # ------------------------------------------------------------------ vertikala
@@ -457,7 +618,7 @@ def faze1_pravidla(rc):
     if h["registr_smluv"]["pocet"]:
         shr += f"V Registru smluv {h['registr_smluv']['pocet']} smluv za {kc(h['registr_smluv']['objem_czk'])}."
 
-    q1 = [x["segment"].split(" ", 1)[-1] for x in h["segmenty"][:3] if x["segment"] != "neuvedeno"] or [p for p, _ in nace_cpv(rc)[:4]] or {
+    q1 = [x["segment"].split(" ", 1)[-1] for x in h["segmenty"][:3] if x["segment"] != "neuvedeno"] or [p for p, _ in nace_cpv(rc)[:3]] or {
         "stavebnictvi": ["Pozemní stavby", "Silnice a komunikace", "Vodovody a kanalizace"],
         "it_sw": ["Vývoj software na zakázku", "Provoz a podpora IS", "Licence a cloud"],
         "facility_sluzby": ["Úklid", "Údržba budov", "Ostraha"],
@@ -491,21 +652,81 @@ def faze1_pravidla(rc):
           "poradenstvi": ["Odborná způsobilost / autorizace", "Reference ve veřejné správě", "ISO 9001", "Klíčoví experti s praxí 5+ let", "Ochota jít do konsorcia"],
           "jine": ["ISO 9001", "Reference ve veřejné správě", "Ochota jít do konsorcia / subdodávek"]}[vert]
 
+    ci = rc.get("ci") or {}
+    seg_ev = [f"{x['segment']}: {x['pocet']} " + ("výhra" if x["pocet"] == 1 else "výhry" if x["pocet"] < 5 else "výher")
+              for x in h["segmenty"][:3]]
+    ev1 = ([{"text": "Vaše výhry podle oborů – " + "; ".join(seg_ev), "zdroj": "ISVZ", "rating": "A1"}] if seg_ev else
+           [{"text": "Bez historie ve veřejných zakázkách – obory odvozuji z NACE v ARES" + (" a z webu." if rc.get("web") else "."),
+             "zdroj": "ARES", "rating": "A1"}])
+    neg_n = {norm(n) for n in VERT_NEG[vert]}
+    for b in [b for b in (ci.get("bila_mista") or []) if norm(b["segment"].split(" ", 1)[-1]) not in neg_n][:2]:
+        konec = len(q1) - 1 if q1 and q1[-1].startswith("Vyhnout se") else len(q1)
+        q1.insert(min(konec, 4), f"Rozšířit do: {b['segment'].split(' ', 1)[-1]}")
+        ev1.append({"text": f"{b['segment']}: u {_tvar(b['zakazniku'], 'vašeho zákazníka', 'vašich zákazníků', 'vašich zákazníků')} tu "
+                            f"konkurenti vyhráli {_tvar(b['pocet'], 'zakázku', 'zakázky', 'zakázek')} za {kc(b['objem'])} (3 roky)"
+                            + (f", hlavně {_bez_tecky(b['lidr'])}" if b.get("lidr") else "") + ".",
+                    "zdroj": "ISVZ", "rating": "A1"})
+
+    # strategicky cil -> urcuje, co zpravodaj stavi nahoru (stavajici zakaznici / novi zadavatele / nove obory)
+    k = ci.get("koncentrace")
+    ev_s = []
+    if k and k["zakazniku"] >= 2:
+        ev_s.append({"text": f"Největší zákazník {k['top_nazev']} = {k['top_podil'] * 100:.0f} % veřejných tržeb, "
+                             f"top 3 = {k['top3_podil'] * 100:.0f} % ({k['zakazniku']} zákazníků celkem).",
+                     "zdroj": "ISVZ + Registr smluv", "rating": "A1"})
+    t = ci.get("trend")
+    if t and (t["posl12"] or t["pred12"]):
+        ev_s.append({"text": f"Vyhrané soutěže: {t['posl12']} za posledních 12 měsíců vs. {t['pred12']} v předchozích 12.",
+                     "zdroj": "ISVZ", "rating": "A1"})
+    q_strat = ["Bránit a prohloubit stávající zákazníky", "Získat nové zadavatele ve svém oboru",
+               "Vstoupit do sousedního oboru", "Dostat se k větším zakázkám"]
+    if k and k["top_podil"] >= 0.4:
+        q_strat[1] += f" (snížit závislost na {k['top_nazev'][:40]})"
+
+    # konkurenti ke sledovani: primi soupeři z ucasti, jinak lidri segmentu
+    sb = ci.get("souboje") or []
+    if sb:
+        q_konk = [f"{x['nazev'][:60]} – {x['stretu']}× střet, {x['my_vyhra']}:{x['oni_vyhra']}" for x in sb[:5]]
+        ev_k = [{"text": "Firmy, se kterými jste soupeřili ve stejných soutěžích (skóre vaše výhry : jejich výhry).",
+                 "zdroj": "ISVZ (účastníci)", "rating": "A1"}]
+    else:
+        q_konk = [f"{x['nazev'][:60]} – lídr segmentu {x['segment']}" for x in (ci.get("lidri") or [])[:5]]
+        ev_k = [{"text": "Účastníky vašich soutěží zdroj neuvádí – nabízím největší dodavatele vašich hlavních segmentů.",
+                 "zdroj": "ISVZ (vítězové)", "rating": "A1"}] if q_konk else []
+    q_konk = q_konk or ["Zatím nikoho – konkurenty doplním později"]
+
+    ev2 = ([{"text": f"Dosud vyhrané zakázky: typicky {kc(h['p25_czk'])} – {kc(h['p75_czk'])} (medián {kc(med)}, max {kc(h['max_czk'])}).",
+             "zdroj": "ISVZ", "rating": "A1"}] if med else [])
+    ev3 = ([{"text": "Kde jste dosud plnili: " + ", ".join(f"{x['kraj']} ({x['pocet']}×)" for x in h["kraje"][:4] if x["kraj"]),
+             "zdroj": "ISVZ (místo plnění)", "rating": "A1"}] if h["kraje"] else [])
+    if s.get("adresa") or s.get("mesto"):
+        ev3.append({"text": f"Sídlo: {s.get('adresa') or s.get('mesto')}", "zdroj": "ARES", "rating": "A1"})
+    ev4 = [{"text": "Kvalifikace v rejstřících nedohledáme (ISO, autorizace, prověrky) – bez vaší odpovědi by zpravodaj "
+                    "doporučoval i zakázky, do kterých nemůžete podat.", "zdroj": "–", "rating": "–"}]
+
+    def ot(qid, cat, text, qr, multi, proc, ev):
+        return {"id": qid, "category": cat, "question_text": text, "quick_replies": qr[:6], "allow_multiple": multi,
+                "proc": proc, "evidence": ev}
+
     return {
         "status": "needs_clarification",
         "detected_summary": shr.strip(),
         "detected_vertical": vert,
         "questions": [
-            {"id": "q1_scope", "category": "Předmět a exkluze",
-             "question_text": "Co chcete hlídat přednostně a čemu se naopak vyhnout? (Můžete dopsat vlastní.)",
-             "quick_replies": q1[:5], "allow_multiple": True},
-            {"id": "q2_budget", "category": "Rozpočet a kapacita",
-             "question_text": "Jak velké zakázky dávají smysl a kolik dní minimálně potřebujete na přípravu nabídky?",
-             "quick_replies": q2[:5], "allow_multiple": True},
-            {"id": "q3_region", "category": q3_cat, "question_text": q3_text, "quick_replies": q3[:5], "allow_multiple": False},
-            {"id": "q4_qualification", "category": "Kvalifikace a oprávnění",
-             "question_text": "Které z kvalifikačních předpokladů splňujete (ZZVZ § 77–79) a půjdete i do konsorcia?",
-             "quick_replies": q4[:5], "allow_multiple": True},
+            ot("q1_scope", "Předmět a exkluze", "Co chcete hlídat přednostně a čemu se naopak vyhnout? (Můžete dopsat vlastní.)",
+               q1, True, "Určí CPV kódy a klíčová slova, podle kterých vybírám zakázky. Exkluze odfiltrují šum.", ev1),
+            ot("q5_strategy", "Strategický cíl", "Jaký je váš hlavní obchodní cíl ve veřejných zakázkách na příštích 12 měsíců?",
+               q_strat, False, "Podle cíle řadím zpravodaj: stávající zákazníci, noví zadavatelé, nebo nové obory nahoru.", ev_s),
+            ot("q6_competitors", "Konkurence", "Které konkurenty chcete systematicky sledovat?",
+               q_konk, True, "U každé nové zakázky upozorním, pokud u daného zadavatele dřív vyhrál sledovaný konkurent "
+                             "(signál, že je zadávací dokumentace psaná pro něj, nebo že s ním máte počítat v ceně).", ev_k),
+            ot("q2_budget", "Rozpočet a kapacita", "Jak velké zakázky dávají smysl a kolik dní minimálně potřebujete na přípravu nabídky?",
+               q2, True, "Vyřadí zakázky, na které nemáte kapacitu nebo čas, a malé zakázky, které se nevyplatí.", ev2),
+            ot("q3_region", q3_cat, q3_text, q3, False,
+               "Vzdálenost od sídla je u služeb na místě hlavní nákladová položka – mimo dojezd zakázky skryji.", ev3),
+            ot("q4_qualification", "Kvalifikace a oprávnění",
+               "Které z kvalifikačních předpokladů splňujete (ZZVZ § 77–79) a půjdete i do konsorcia?",
+               q4, True, "Zakázky s kvalifikací, kterou nemáte, označím jako KO (vyřazující).", ev4),
         ],
     }
 
@@ -540,9 +761,16 @@ def faze2_pravidla(rc, f1, odp):
     sel1, txt1 = _odpoved_text(odp, "q1_scope")
     neg = []
     chci = []
+    rozsirit = []  # sousedni obory, kde nakupuji stavajici zakaznici (nabidnuto z CI analyzy)
+    div_podle_nazvu = {norm(v): k for k, v in CPV_DIV.items()}
     for x in sel1:
         if norm(x).startswith("vyhnout se"):
             neg.append(x.split(":", 1)[-1].strip())
+        elif norm(x).startswith("rozsirit do"):
+            nazev = x.split(":", 1)[-1].strip()
+            if div_podle_nazvu.get(norm(nazev)):
+                rozsirit.append(div_podle_nazvu[norm(nazev)] + "000000")
+            chci.append(nazev)
         else:
             chci.append(x)
     for kus in re.split(r"[;,\n]", txt1):
@@ -560,7 +788,7 @@ def faze2_pravidla(rc, f1, odp):
     vybrane_nace = [codes for label, codes in nc if norm(label) in chci_seg] or [codes for _, codes in nc[:1]]
     for codes in vybrane_nace:
         main += [c for c in codes if c not in main]
-    main = main[:8] or VERT_CPV_DEFAULT[vert][:2]
+    main = (main[:7] + [c for c in rozsirit if c not in main[:7]])[:9] or VERT_CPV_DEFAULT[vert][:2]
     secondary = [c["cpv"] for c in h["top_cpv"] if c["cpv"] not in main][:8]
     secondary += [c for _, codes in nc for c in codes if c not in main and c not in secondary]
     secondary = secondary[:10] or VERT_CPV_DEFAULT[vert][2:]
@@ -601,6 +829,8 @@ def faze2_pravidla(rc, f1, odp):
         vzmr = True
     if lo is not None and lo < 2e6:
         vzmr = True
+    zaokr = lambda x: None if x is None else float(round(x, -3) if x < 1e6 else round(x, -4))  # bez halerovych desetin
+    lo, hi = zaokr(lo), zaokr(hi)
 
     # Q3 regiony / model spoluprace
     sel3, txt3 = _odpoved_text(odp, "q3_region")
@@ -636,6 +866,27 @@ def faze2_pravidla(rc, f1, odp):
     kval += [k.strip() for k in re.split(r"[;,\n]", txt4) if k.strip()]
     konsorcium = any("konsorc" in norm(x) or "subdod" in norm(x) for x in sel4) or "konsorc" in norm(txt4)
 
+    # Q5 strategicky cil
+    sel5, txt5 = _odpoved_text(odp, "q5_strategy")
+    v5 = norm(" ".join(sel5) + " " + txt5)
+    strategie = ("stavajici" if "stavajic" in v5 or "branit" in v5 else "novi_zadavatele" if "nove zadavatele" in v5
+                 else "nove_obory" if "sousedni" in v5 or "obor" in v5 else "vetsi_zakazky" if "vetsi" in v5 else None)
+    if strategie == "vetsi_zakazky" and hi:
+        hi = hi * 2  # cil rust: pripustit i vetsi zakazky nez dosud
+
+    # Q6 sledovani konkurenti (jen firmy z dat - zadne odhady)
+    sel6, txt6 = _odpoved_text(odp, "q6_competitors")
+    ci = rc.get("ci") or {}
+    znami = {norm(x["nazev"][:60]): x for x in (ci.get("souboje") or []) + (ci.get("lidri") or [])}
+    watch = []
+    for x in sel6:
+        hit = znami.get(norm(x.split(" – ", 1)[0]))
+        if hit and hit["ico"] not in [w["ico"] for w in watch]:
+            watch.append({"ico": hit["ico"], "nazev": hit["nazev"]})
+    for m in re.findall(r"\b\d{8}\b", txt6):  # IČO dopsana rucne
+        if m not in [w["ico"] for w in watch]:
+            watch.append({"ico": m, "nazev": None})
+
     dealbreakers = [f"lhůta na nabídku kratší než {prep} dní"]
     if hi:
         dealbreakers.append(f"zakázky nad {kc(hi * 1.5)} (mimo kapacitu)")
@@ -646,7 +897,8 @@ def faze2_pravidla(rc, f1, odp):
     # klicova slova z historie a webu
     txt = " ".join(h["nazvy_vyher"] + h["registr_smluv"]["predmety"] + [((rc.get("web") or {}).get("popis") or "")] + chci)
     stopz = {norm(z["nazev"] or "") for z in h["top_zadavatele"]}
-    kw = [w for w, _ in Counter(w for w in norm(txt).split() if len(w) > 4 and w not in STOP and not any(w in z for z in stopz)).most_common(12)]
+    kw = [w for w, _ in Counter(w for w in norm(txt).split()
+                                if len(w) > 4 and w not in STOP_KW and not w.isdigit() and not any(w in z for z in stopz)).most_common(12)]
 
     seg_txt = ", ".join(CPV_DIV.get(c[:2], c) for c in dict.fromkeys(c[:2] for c in main))
     web = rc.get("web") or {}
@@ -664,6 +916,7 @@ def faze2_pravidla(rc, f1, odp):
             "budget": {"min_czk": lo, "max_czk": hi, "vzmr_interest": vzmr}, "min_prep_days": prep,
             "qualifications": kval, "consortium_ok": konsorcium, "dealbreakers": dealbreakers,
             "whitelist_procurer_icos": [z["ico"] for z in h["top_zadavatele"][:8]], "blacklist_procurer_icos": [],
+            "strategy": strategie, "watchlist": watch[:10],
         },
     }
 
@@ -672,19 +925,31 @@ def faze2_pravidla(rc, f1, odp):
 CPV8 = re.compile(r"^\d{8}$")
 
 
+# otazky, ktere smi model preformulovat; konkurenty (q6) a dukazy bereme vzdy z dat, aby model nevymyslel firmy
+PREFORMULOVAT = {"q1_scope", "q5_strategy", "q2_budget", "q3_region", "q4_qualification"}
+
+
 def _ocisti_faze1(d, zaloha):
-    qs = [q for q in (d.get("questions") or []) if isinstance(q, dict) and isinstance(q.get("question_text"), str)]
-    if len(qs) < 4:
-        qs += zaloha["questions"][len(qs):]
-    ids = ["q1_scope", "q2_budget", "q3_region", "q4_qualification"]
-    for i, q in enumerate(qs[:4]):
-        q["id"] = ids[i]
+    llm_q = {}
+    for i, q in enumerate(d.get("questions") or []):
+        if isinstance(q, dict) and isinstance(q.get("question_text"), str):
+            qid = q.get("id") if q.get("id") in PREFORMULOVAT else None
+            if qid is None and i < 4:  # starsi format bez id: poradi q1-q4
+                qid = ["q1_scope", "q2_budget", "q3_region", "q4_qualification"][i]
+            if qid and qid not in llm_q:
+                llm_q[qid] = q
+    out = []
+    for z in zaloha["questions"]:
+        q = llm_q.get(z["id"]) if z["id"] in PREFORMULOVAT else None
+        if not q:
+            out.append(z)
+            continue
         qr = q.get("quick_replies") if isinstance(q.get("quick_replies"), list) else []
-        q["quick_replies"] = [str(x)[:200] for x in qr][:5] or zaloha["questions"][i]["quick_replies"]
-        q["question_text"] = q["question_text"][:600]
-        q["allow_multiple"] = bool(q.get("allow_multiple", True))
-        q["category"] = str(q.get("category") or zaloha["questions"][i].get("category") or "")[:60]
-    d["questions"] = qs[:4]
+        out.append({**z, "question_text": q["question_text"][:600],
+                    "quick_replies": [str(x)[:200] for x in qr][:6] or z["quick_replies"],
+                    "allow_multiple": bool(q.get("allow_multiple", z["allow_multiple"])),
+                    "category": str(q.get("category") or z["category"])[:60]})
+    d["questions"] = out
     if not isinstance(d.get("detected_summary"), str) or not d["detected_summary"].strip():
         d["detected_summary"] = zaloha["detected_summary"]
     d["detected_summary"] = d["detected_summary"][:2000]
@@ -718,6 +983,9 @@ def _ocisti_profil(p, zaloha, rc):
         p["obrat_czk"] = max(0.0, min(float(p.get("obrat_czk") or 0), 1e12)) or None
     except (TypeError, ValueError):
         p["obrat_czk"] = None
+    p["watchlist"] = z.get("watchlist") or []  # jen firmy vybrane z dat (model je nesmi pridavat)
+    if p.get("strategy") not in ("stavajici", "novi_zadavatele", "nove_obory", "vetsi_zakazky", None):
+        p["strategy"] = z.get("strategy")
     p["sidlo"] = rc["sidlo"]
     return p
 
@@ -1100,13 +1368,21 @@ def zpravodaj(con, profil, today=None, dni=14, limit=30):
     konk = _konkurence(con)
     kap = kapacita(con, profil["ico"], today)
     klienti = _klienti(con, profil["ico"])
+    watch = _sledovani(con, profil.get("watchlist") or [])
+    strat = profil.get("strategy")
+    max_ref = max((x for v in (kap or {}).get("reference", {}).values() for x in v), default=None)
     polozky = []
     for z in kand:
         v = vhodnost(z, profil, tf, qv, konk, today, klienti, kap)
         if v["kriteria"][0]["skore"] < 35:  # predmet vubec nesedi -> do zpravodaje nepatri
             continue
         lh = parse_date(z.get("lhuta_nabidek"))
-        polozky.append({"id": z["id"], "nazev": z["nazev"], "zadavatel": z["zadavatel_nazev"], "zadavatel_ico": z["zadavatel_ico"],
+        zi = z.get("zadavatel_ico")
+        znamy = bool(zi and klienti.get(zi))
+        cil = {"stavajici": znamy and "váš stávající zákazník", "novi_zadavatele": (zi and not znamy) and "nový zadavatel",
+               "vetsi_zakazky": (max_ref and (z.get("predpokladana_hodnota") or 0) > max_ref) and "větší než vaše dosavadní maximum"
+               }.get(strat) or None
+        polozky.append({"sledovani": watch.get(zi, []) if zi else [], "cil": cil,"id": z["id"], "nazev": z["nazev"], "zadavatel": z["zadavatel_nazev"], "zadavatel_ico": z["zadavatel_ico"],
                         "kraj": z["kraj"], "hodnota": z["predpokladana_hodnota"], "datum": z["datum_zahajeni"],
                         "lhuta": (z.get("lhuta_nabidek") or "")[:10], "otevrena": bool(lh and lh >= today), **odkazy(z),
                         "segment": cpv_group(z["cpv_hlavni"]), **v})
@@ -1122,6 +1398,25 @@ def zpravodaj(con, profil, today=None, dni=14, limit=30):
     return {"od": od.isoformat(), "do": ref.isoformat(), "poznamka": pozn, "kandidatu": len(kand),
             "otevrenych": sum(1 for p in polozky if p["otevrena"]),
             "doporuceno": sum(1 for p in polozky if p["verdikt"] == "doporučeno"), "polozky": polozky[:limit]}
+
+
+def _sledovani(con, watch):
+    """Zadavatel -> [{"nazev", "vyher"}] sledovanych konkurentu, kteri u nej uz vyhrali (signal pro rozhodnuti, zda podat)."""
+    icos = [w["ico"] for w in watch if w.get("ico")][:10]
+    if not icos:
+        return {}
+    nazvy = {w["ico"]: w.get("nazev") for w in watch}
+    from .api import _nazvy
+    nazvy.update({k: v for k, v in _nazvy(con, icos).items() if v})
+    out = defaultdict(list)
+    for zi, d, n in con.execute(
+            f"""SELECT z.zadavatel_ico, v.dodavatel_ico, COUNT(*) FROM vitezove v JOIN zakazky z ON z.id=v.zakazka_id
+                WHERE v.dodavatel_ico IN ({','.join('?' * len(icos))}) AND z.zadavatel_ico IS NOT NULL
+                GROUP BY z.zadavatel_ico, v.dodavatel_ico""", icos):  # nosec B608 - jen otazniky
+        out[zi].append({"ico": d, "nazev": nazvy.get(d) or d, "vyher": n})
+    for v in out.values():
+        v.sort(key=lambda x: -x["vyher"])
+    return out
 
 
 def _klienti(con, ico):

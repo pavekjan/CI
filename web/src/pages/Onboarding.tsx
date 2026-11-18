@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
-  api, type AgentInfo, type Faze1, type Kriterium, type Odpoved, type PolozkaZpravodaje, type Profil2, type Recon, type Srazka, type Zpravodaj,
+  api, type AgentInfo, type CiAnalyza, type Dukaz, type Faze1, type Kriterium, type NalezFirmy, type Odpoved, type PolozkaZpravodaje, type Profil2,
+  type Recon, type Srazka, type Zpravodaj,
 } from "../api";
 import { Card, go, Kpi, Loading } from "../components";
 import { datum, kc, num } from "../format";
@@ -10,6 +11,10 @@ const KRAJE: [string, string][] = [
   ["CZ042", "Ústecký"], ["CZ051", "Liberecký"], ["CZ052", "Královéhradecký"], ["CZ053", "Pardubický"], ["CZ063", "Vysočina"],
   ["CZ064", "Jihomoravský"], ["CZ071", "Olomoucký"], ["CZ072", "Zlínský"], ["CZ080", "Moravskoslezský"],
 ];
+const STRATEGIE: Record<string, string> = {
+  stavajici: "bránit a prohloubit stávající zákazníky", novi_zadavatele: "získat nové zadavatele",
+  nove_obory: "vstoupit do sousedního oboru", vetsi_zakazky: "dostat se k větším zakázkám",
+};
 const VERT: Record<string, string> = {
   stavebnictvi: "Stavebnictví", it_sw: "IT a software", facility_sluzby: "Facility a služby",
   dodavky_zbozi: "Dodávky zboží", poradenstvi: "Poradenství", jine: "Jiný obor",
@@ -19,7 +24,7 @@ function AgentBadge({ a }: { a: AgentInfo | null }) {
   if (!a) return null;
   return a.rezim === "llm" || a.rezim === "claude"
     ? <span className="badge good" title={`${a.vstup_tokenu ?? "?"} vstupních / ${a.vystup_tokenu ?? "?"} výstupních tokenů`}>Agent: {a.poskytovatel ?? "AI"} ({a.model})</span>
-    : <span className="badge neutral" title={a.duvod}>Agent: pravidla{a.duvod ? ` – ${a.duvod}` : ""}</span>;
+    : <span className="badge neutral" title={a.duvod ? `Bez AI, podle pravidel z dat: ${a.duvod}` : "Bez AI, podle pravidel z dat"}>Agent: pravidla</span>;
 }
 
 // ------------------------------------------------------------------ hlavni stranka
@@ -51,6 +56,7 @@ export default function Onboarding({ ico }: { ico: string | null }) {
     try {
       const r = await api.onbStart(i, web);
       setRecon(r.recon); setF1(r.faze1); setAgent1(r.agent); setOdp({}); setProfil(null); setZprav(null);
+      setTimeout(() => document.getElementById("recon")?.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
       if (`#/onboarding/${r.recon.ico}` !== window.location.hash) window.history.replaceState(null, "", `#/onboarding/${r.recon.ico}`);
     } catch (e) {
       setErr(String((e as Error).message ?? e));
@@ -90,13 +96,14 @@ export default function Onboarding({ ico }: { ico: string | null }) {
       <div>
         <h1>Onboarding firmy a Day-0 zpravodaj</h1>
         <p className="secondary" style={{ margin: "6px 0 0" }}>
-          Zadejte IČO. Agenti potichu zjistí, co firma dělá, položí 4 cílené otázky, sestaví profil a hned ukážou zakázky, které by ji zajímaly.
+          Zadejte IČO, název nebo web. Agent z otevřených zdrojů (ARES, ISVZ, Registr smluv, web) sestaví zpravodajský obraz firmy a jejích
+          konkurentů, položí 6 otázek podložených daty, sestaví profil a hned ukáže zakázky, které firmu mají zajímat.
         </p>
       </div>
       <StartForm initial={ico ?? ""} onStart={start} disabled={!!busy} />
       {err && <div className="callout">{err}</div>}
       {busy && <Card><Loading text={busy} /></Card>}
-      {recon && f1 && <ReconCard recon={recon} f1={f1} agent={agent1} />}
+      {recon && f1 && <div id="recon"><ReconCard recon={recon} f1={f1} agent={agent1} /></div>}
       {recon && f1 && <Dotaznik f1={f1} odp={odp} setOdp={setOdp} onSubmit={dokoncit} disabled={!!busy} hotovo={!!profil} />}
       {profil && <ProfilCard profil={profil} agent={agent2} onSave={ulozit} disabled={!!busy} />}
       {zprav && profil && <ZpravodajCard z={zprav} profil={profil} />}
@@ -104,26 +111,62 @@ export default function Onboarding({ ico }: { ico: string | null }) {
   );
 }
 
-// ------------------------------------------------------------------ krok 0: IČO
+// ------------------------------------------------------------------ krok 0: firma (IČO, nazev nebo web)
 function StartForm({ initial, onStart, disabled }: { initial: string; onStart: (ico: string, web: string) => void; disabled: boolean }) {
-  const [ico, setIco] = useState(initial);
-  const [web, setWeb] = useState("");
+  const [q, setQ] = useState(initial);
+  const [nalez, setNalez] = useState<NalezFirmy | null>(null);
+  const [hledam, setHledam] = useState(false);
+  const [chyba, setChyba] = useState<string | null>(null);
   const [seznam, setSeznam] = useState<{ ico: string; nazev: string | null; hotovo: boolean; vertical: string | null }[]>([]);
-  useEffect(() => { setIco(initial); }, [initial]);
+  useEffect(() => { setQ(initial); setNalez(null); }, [initial]);
   useEffect(() => { api.onbSeznam().then(setSeznam).catch(() => undefined); }, [initial]);
+
+  const hledej = async () => {
+    const t = q.trim();
+    if (!t) return;
+    setChyba(null); setHledam(true); setNalez(null);
+    try {
+      const r = await api.najdiFirmu(t);
+      // jednoznacne IČO nebo IČO nalezene na webu -> rovnou spustit
+      if (r.kandidati.length === 1 && (r.typ === "ico" || r.typ === "web") && !r.poznamka) onStart(r.kandidati[0].ico, r.web ?? "");
+      else setNalez(r);
+    } catch (e) {
+      setChyba(String((e as Error).message ?? e));
+    } finally {
+      setHledam(false);
+    }
+  };
+
   return (
-    <Card title="1. Firma" sub="IČO stačí. Web je nepovinný – agent z něj vytáhne popis činnosti.">
-      <form className="onb-start" onSubmit={(e) => { e.preventDefault(); if (ico.trim()) onStart(ico.trim(), web.trim()); }}>
-        <label>
-          <span className="small secondary">IČO</span>
-          <input className="field" value={ico} onChange={(e) => setIco(e.target.value)} placeholder="např. 27082440" inputMode="numeric" />
-        </label>
-        <label>
-          <span className="small secondary">Web firmy (nepovinné)</span>
-          <input className="field" value={web} onChange={(e) => setWeb(e.target.value)} placeholder="např. www.firma.cz" />
-        </label>
-        <button className="btn primary" disabled={disabled || !ico.trim()}>Spustit rešerši</button>
+    <Card title="1. Firma" sub="Napište IČO, název firmy nebo adresu webu. Z webu si agent IČO dohledá sám (firmy ho musí na webu uvádět).">
+      <form className="onb-start" onSubmit={(e) => { e.preventDefault(); hledej(); }}>
+        <div className="search-field">
+          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" strokeWidth="2" /><path d="m20 20-3.5-3.5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" /></svg>
+          <input className="field big" value={q} onChange={(e) => setQ(e.target.value)} autoFocus
+            placeholder="např. 27082440, Strabag nebo www.alza.cz" aria-label="IČO, název firmy nebo web" />
+        </div>
+        <button className="btn primary big" disabled={disabled || hledam || !q.trim()}>{hledam ? "Hledám…" : "Najít a spustit rešerši"}</button>
       </form>
+      {chyba && <div className="callout" style={{ marginTop: 12 }}>{chyba}</div>}
+      {nalez && (
+        <div className="kandidati">
+          {nalez.poznamka && <div className="small secondary" style={{ marginBottom: 8 }}>{nalez.poznamka}</div>}
+          {nalez.kandidati.length > 0 && <div className="small muted" style={{ marginBottom: 6 }}>Vyberte firmu:</div>}
+          {nalez.kandidati.map((k) => (
+            <button key={k.ico} type="button" className="kandidat" disabled={disabled} onClick={() => { setNalez(null); onStart(k.ico, nalez.web ?? ""); }}>
+              <span className="kandidat-main">
+                <b>{k.nazev ?? "(název neznámý)"}</b>
+                <span className="small secondary">IČO {k.ico}{k.sidlo ? ` · ${k.sidlo}` : ""}</span>
+              </span>
+              <span className="kandidat-meta small">
+                {k.vyhry > 0 && <span className="badge good">{num(k.vyhry)} výher</span>}
+                {k.smluv_rs > 0 && <span className="badge neutral">{num(k.smluv_rs)} smluv</span>}
+                <span className="muted">{k.zdroj}</span>
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
       {seznam.length > 0 && (
         <div className="row" style={{ marginTop: 14, gap: 8 }}>
           <span className="small muted">Uložené profily:</span>
@@ -154,6 +197,7 @@ function ReconCard({ recon, f1, agent }: { recon: Recon; f1: Faze1; agent: Agent
         <Kpi label="Registr smluv" value={num(h.registr_smluv.pocet)} note={kc(h.registr_smluv.objem_czk)} />
         <Kpi label="Sídlo" value={recon.sidlo?.mesto ?? recon.sidlo?.kraj ?? "?"} note={recon.sidlo?.kraj ?? ""} />
       </div>
+      {recon.ci && <CiBlok ci={recon.ci} />}
       <div className="row" style={{ marginTop: 12, gap: 6 }}>
         <span className="small muted">Zdroje:</span>
         {recon.zdroje.map((z) => (
@@ -166,7 +210,57 @@ function ReconCard({ recon, f1, agent }: { recon: Recon; f1: Faze1; agent: Agent
   );
 }
 
-// ------------------------------------------------------------------ krok 2: 4 otazky
+// ------------------------------------------------------------------ CI: klicova zjisteni + konkurenti
+const JISTOTA: Record<string, string> = { "vysoká": "good", "střední": "warn", "nízká": "neutral" };
+
+function Rating({ r }: { r: string }) {
+  if (!r || r === "–") return null;
+  return <span className="rating" title={`Admiralty kód: ${r[0]} = spolehlivost zdroje (A = zcela spolehlivý, oficiální registr), ${r.slice(1)} = věrohodnost informace (1 = potvrzeno)`}>{r}</span>;
+}
+
+function CiBlok({ ci }: { ci: CiAnalyza }) {
+  const sb = ci.souboje.slice(0, 6);
+  return (
+    <div className="ci">
+      {ci.zjisteni.length > 0 && (
+        <div>
+          <div className="ci-h">Klíčová zjištění</div>
+          <ul className="zjisteni">
+            {ci.zjisteni.map((z, i) => (
+              <li key={i}>
+                <span>{z.text}</span>
+                <span className="zj-meta"><span className="muted">{z.zdroj}</span> <Rating r={z.rating} />
+                  <span className={`badge ${JISTOTA[z.jistota] ?? "neutral"}`} title="Jistota závěru podle velikosti vzorku">jistota {z.jistota}</span></span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {sb.length > 0 && (
+        <div>
+          <div className="ci-h">Přímí soupeři <span className="muted small">(společné soutěže, vaše výhry : jejich výhry)</span></div>
+          <div className="souboje">
+            {sb.map((x) => {
+              const tot = Math.max(1, x.my_vyhra + x.oni_vyhra);
+              return (
+                <a key={x.ico} className="souboj" href={`#/firma/${x.ico}`}>
+                  <span className="souboj-nazev">{x.nazev}</span>
+                  <span className="souboj-bar" title={`${x.my_vyhra} : ${x.oni_vyhra}`}>
+                    <span className="my" style={{ width: `${(100 * x.my_vyhra) / tot}%` }} />
+                    <span className="oni" style={{ width: `${(100 * x.oni_vyhra) / tot}%` }} />
+                  </span>
+                  <span className="small num">{x.my_vyhra}:{x.oni_vyhra} <span className="muted">/ {num(x.stretu)}×</span></span>
+                </a>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ------------------------------------------------------------------ krok 2: otazky
 function Dotaznik({ f1, odp, setOdp, onSubmit, disabled, hotovo }: {
   f1: Faze1; odp: Record<string, Odpoved>; setOdp: (o: Record<string, Odpoved>) => void; onSubmit: () => void; disabled: boolean; hotovo: boolean;
 }) {
@@ -178,12 +272,14 @@ function Dotaznik({ f1, odp, setOdp, onSubmit, disabled, hotovo }: {
   };
   const odpovezeno = f1.questions.filter((q) => (odp[q.id]?.vybrano.length ?? 0) > 0 || (odp[q.id]?.text ?? "").trim()).length;
   return (
-    <Card title="3. Čtyři doplňující otázky" sub="Klikněte na předvolby (u některých jde vybrat víc) nebo dopište vlastní odpověď. Nevyplněné otázky agent doplní z historie firmy.">
+    <Card title={`3. ${f1.questions.length} otázek podložených daty`} sub="Ke každé otázce vidíte, z čeho vychází a co odpověď změní. Klikněte na předvolby nebo dopište vlastní odpověď; nevyplněné otázky agent doplní z historie firmy.">
       <div className="grid" style={{ gap: 18 }}>
         {f1.questions.map((q, i) => (
           <div key={q.id} className="otazka">
             <div className="small muted">{i + 1}. {q.category}{q.allow_multiple ? " · více možností" : ""}</div>
             <div className="otazka-text">{q.question_text}</div>
+            {(q.evidence?.length ?? 0) > 0 && <Dukazy ev={q.evidence as Dukaz[]} />}
+            {q.proc && <div className="small secondary proc"><b>Proč se ptáme:</b> {q.proc}</div>}
             <div className="row" style={{ gap: 8, marginTop: 8 }}>
               {q.quick_replies.map((r) => (
                 <button key={r} type="button" className={`chip btnchip ${odp[q.id]?.vybrano.includes(r) ? "on" : ""}`} onClick={() => toggle(q.id, r, q.allow_multiple)}>
@@ -198,9 +294,19 @@ function Dotaznik({ f1, odp, setOdp, onSubmit, disabled, hotovo }: {
       </div>
       <div className="row" style={{ marginTop: 16 }}>
         <button className="btn primary" disabled={disabled} onClick={onSubmit}>{hotovo ? "Znovu sestavit profil" : "Sestavit profil a zpravodaj"}</button>
-        <span className="small muted">zodpovězeno {odpovezeno} ze 4</span>
+        <span className="small muted">zodpovězeno {odpovezeno} z {f1.questions.length}</span>
       </div>
     </Card>
+  );
+}
+
+function Dukazy({ ev }: { ev: Dukaz[] }) {
+  return (
+    <ul className="dukazy">
+      {ev.map((e, i) => (
+        <li key={i}><span>{e.text}</span> {e.zdroj !== "–" && <span className="muted small">{e.zdroj}</span>} <Rating r={e.rating} /></li>
+      ))}
+    </ul>
   );
 }
 
@@ -277,12 +383,18 @@ function ProfilCard({ profil, agent, onSave, disabled }: { profil: Profil2; agen
             </div>
             <div className="row small" style={{ marginTop: 10, gap: 14 }}>
               <label><input type="checkbox" checked={p.budget.vzmr_interest} onChange={(e) => set({ budget: { ...p.budget, vzmr_interest: e.target.checked } })} /> zájem o VZMR</label>
-              <label><input type="checkbox" checked={p.consortium_ok} onChange={(e) => set({ consortium_ok: e.target.checked })} /> konsorcia / subdodávky</label>
               {p.cooperation_model && <span className="secondary">model: {p.cooperation_model}</span>}
             </div>
             <label className="lbl">Dealbreakery</label>
             <ul className="small secondary" style={{ margin: "4px 0 0", paddingLeft: 18 }}>{p.dealbreakers.map((d) => <li key={d}>{d}</li>)}</ul>
             <div className="small muted" style={{ marginTop: 6 }}>Whitelist zadavatelů (dosavadní klienti): {p.whitelist_procurer_icos.length}</div>
+            {p.strategy && <div className="small" style={{ marginTop: 6 }}><span className="muted">Strategický cíl:</span> <b>{STRATEGIE[p.strategy]}</b></div>}
+            {(p.watchlist?.length ?? 0) > 0 && (
+              <div className="row small" style={{ marginTop: 6, gap: 6 }}>
+                <span className="muted">Sledovaní konkurenti:</span>
+                {p.watchlist!.map((w) => <a key={w.ico} className="chip" href={`#/firma/${w.ico}`}>{w.nazev ?? w.ico}</a>)}
+              </div>
+            )}
           </div>
         </div>
         <div className="row" style={{ marginTop: 14 }}>
@@ -366,6 +478,14 @@ function ZpravodajCard({ z, profil }: { z: Zpravodaj; profil: Profil2 }) {
                   {p.zadavatel ?? "?"} · {p.kraj ?? "?"}{p.kriteria.find((c) => c.km !== undefined) ? ` (${p.kriteria.find((c) => c.km !== undefined)?.km} km)` : ""} · {kc(p.hodnota)} · lhůta {datum(p.lhuta)}
                   {!p.otevrena && " · uplynula"}
                 </span>
+                {((p.sledovani?.length ?? 0) > 0 || p.cil) && (
+                  <span className="row" style={{ gap: 6, marginTop: 4 }}>
+                    {p.cil && <span className="badge good">cíl: {p.cil}</span>}
+                    {p.sledovani?.slice(0, 2).map((w) => (
+                      <span key={w.ico} className="badge warn" title="Sledovaný konkurent u tohoto zadavatele už vyhrál">⚑ {w.nazev} tu vyhrál {w.vyher}×</span>
+                    ))}
+                  </span>
+                )}
               </span>
               <span className={`badge ${VCLASS[v.verdikt]}`}>{v.verdikt}</span>
             </button>

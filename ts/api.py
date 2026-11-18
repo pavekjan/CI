@@ -43,7 +43,7 @@ def cpv_group(cpv):
 
 
 from .sources.other import ares_firma, google_news
-from .util import clean_ico, log, norm, parse_date, http_get
+from .util import clean_ico, log, norm, nuts_to_kraj, parse_date, http_get
 
 A = "API"
 
@@ -131,8 +131,52 @@ def doplnit_ico_podle_nazvu(con):
     return n
 
 
+_RE_PROLOZENE = re.compile(r"(?:\b\w\b ){3,}\b\w\b(?=\s|$)")
+
+
+def cisty_nazev(nazev):
+    """'S u b t e r r a a.s.' (prolozene pismo z formulare) -> 'Subterra a.s.'"""
+    if not nazev:
+        return nazev
+    return _RE_PROLOZENE.sub(lambda m: m.group(0).replace(" ", ""), nazev).strip()
+
+
+def sloucit_duplicity(con):
+    """Tataz zakazka muze byt v datech dvakrat pod ruznymi cisly (zaznam z Vestniku a zaznam z NEN/profilu
+    s jinym Identifikatorem NIPEZ). Za duplicitu se povazuje stejny zadavatel, stejny nazev a stejni vitezove
+    se stejnou cenou. Zachova se zaznam z Vestniku, ucastnici se sloucí."""
+    kand = con.execute("""SELECT group_concat(id, '|') FROM zakazky WHERE zadavatel_ico IS NOT NULL AND nazev IS NOT NULL
+                          GROUP BY zadavatel_ico, nazev HAVING COUNT(*) > 1""").fetchall()
+    smazat = []
+    for (ids,) in kand:
+        skup = defaultdict(list)
+        for i in ids.split("|"):
+            vit = tuple(sorted((r[0] or "", round(r[1] or 0)) for r in con.execute(
+                "SELECT dodavatel_ico, cena_bez_dph FROM vitezove WHERE zakazka_id=?", (i,))))
+            if vit and any(c for _, c in vit):
+                skup[vit].append(i)
+        for stejne in skup.values():
+            if len(stejne) < 2:
+                continue
+            stejne.sort(key=lambda i: (not i.startswith("rvz:Z"), i))
+            hlavni = stejne[0]
+            for i in stejne[1:]:
+                con.execute("""INSERT OR IGNORE INTO ucastnici (zakazka_id, dodavatel_ico, dodavatel_nazev, nabidkova_cena)
+                               SELECT ?, dodavatel_ico, dodavatel_nazev, nabidkova_cena FROM ucastnici WHERE zakazka_id=?""", (hlavni, i))
+                smazat.append(i)
+    for t, sl in (("vitezove", "zakazka_id"), ("ucastnici", "zakazka_id"), ("zakazky", "id")):
+        # bezpecnost: t a sl jsou konstanty z kodu, hodnoty jdou jako parametry
+        con.executemany(f"DELETE FROM {t} WHERE {sl}=?", [(i,) for i in smazat])  # nosec B608
+    con.executemany("DELETE FROM priznaky WHERE objekt_typ='zakazka' AND objekt_id=?", [(i,) for i in smazat])
+    con.commit()
+    return len(smazat)
+
+
 def rebuild_index(con):
     """Tabulka `dodavatele` pro rychle vyhledavani (vola se po kazde aktualizaci dat)."""
+    sloucene = sloucit_duplicity(con)
+    if sloucene:
+        log(A, f"Index: sloučeno {sloucene} zakázek zapsaných dvakrát (Věstník + NEN)")
     doplneno = doplnit_ico_podle_nazvu(con)
     if doplneno:
         log(A, f"Index: doplněno IČO podle názvu u {doplneno} dodavatelů")
@@ -143,6 +187,7 @@ def rebuild_index(con):
         r = agg.get(ico)
         if r is None:
             r = agg[ico] = {"nazev": nazev, "vyhry": set(), "ucasti": set(), "objem": 0.0, "smluv": 0, "zname": set()}
+        nazev = cisty_nazev(nazev)
         if nazev and (not r["nazev"] or len(nazev) > len(r["nazev"])):
             r["nazev"] = r["nazev"] or nazev
         return r
@@ -170,7 +215,7 @@ def rebuild_index(con):
         if ico in agg and nazev:
             agg[ico]["nazev"] = nazev
     con.executemany("INSERT INTO dodavatele VALUES (?,?,?,?,?,?,?,?,?)",
-                    [(ico, r["nazev"], norm(r["nazev"]), len(r["vyhry"]), len(r["ucasti"]), r["objem"], r["smluv"],
+                    [(ico, cisty_nazev(r["nazev"]), norm(r["nazev"]), len(r["vyhry"]), len(r["ucasti"]), r["objem"], r["smluv"],
                       len(r["zname"]), len(r["zname"] & r["vyhry"]))
                      for ico, r in agg.items()])
     con.commit()
@@ -411,15 +456,17 @@ def hledat(con, q, ares_base=None, limit=12):
     return out[:limit]
 
 
-def ares_hledat(base, nazev, pocet=5):
-    """ARES vyhledani podle nazvu: POST .../ekonomicke-subjekty/vyhledat (nejlepsi snaha, pri chybe prazdno)."""
+def ares_hledat(base, nazev, pocet=5, ico=None):
+    """ARES vyhledani podle nazvu (nebo IČO): POST .../ekonomicke-subjekty/vyhledat (nejlepsi snaha, pri chybe prazdno)."""
     try:
         from .util import session
-        r = session().post(base + "vyhledat", json={"obchodniJmeno": nazev, "pocet": pocet, "start": 0},
+        telo = {"ico": [ico]} if ico else {"obchodniJmeno": nazev}
+        r = session().post(base + "vyhledat", json={**telo, "pocet": pocet, "start": 0},
                            headers={"Accept": "application/json"}, timeout=10)
         if r.status_code != 200:
             return []
-        return [{"ico": s.get("ico"), "nazev": s.get("obchodniJmeno")} for s in r.json().get("ekonomickeSubjekty", [])]
+        return [{"ico": s.get("ico"), "nazev": s.get("obchodniJmeno"), "sidlo": (s.get("sidlo") or {}).get("textovaAdresa")}
+                for s in r.json().get("ekonomickeSubjekty", [])]
     except Exception:
         return []
 
@@ -452,7 +499,11 @@ def _zpravy_firmy(con, base, nazev, online=True, exa_key=None):
     if rows or not online:
         return [dict(r) for r in rows]
     try:
-        items = google_news(base, q, limit=8, retries=1)
+        # nejdriv zpravy za posledni rok (Google jinak radi podle relevance a vraci i 10 let stare clanky)
+        items = google_news(base, f"{q} when:1y", limit=30, retries=1) or google_news(base, q, limit=30, retries=1)
+        for it in items:
+            it["dotaz"] = q
+        items = sorted(items, key=lambda it: it.get("datum") or "", reverse=True)[:8]
     except Exception:
         items = []
     if exa_key:
@@ -614,7 +665,8 @@ def profil(con, ico, cfg, today=None, online=True):
                 if k and re.fullmatch(r"\d{8}", str(k))][:10]
 
     # ---- regiony ----
-    regiony = Counter(w["kraj"] or "neuvedeno" for w in wins).most_common()
+    regiony = Counter(nuts_to_kraj(w["kraj"]) if (w["kraj"] or "").upper().startswith("CZ") else (w["kraj"] or "neuvedeno")
+                      for w in wins).most_common()
 
     # ---- konkurencni intenzita ----
     nab = [w["pocet_nabidek"] for w in wins if w["pocet_nabidek"]]

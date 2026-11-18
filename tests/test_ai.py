@@ -204,7 +204,7 @@ class OnlineVerzeAI(unittest.TestCase):
         d = jj(raw)
         self.assertEqual(d["agent"]["rezim"], "llm")
         self.assertEqual(d["faze1"]["detected_summary"], "Shrnutí od testovací AI")
-        self.assertEqual(len(d["faze1"]["questions"]), 4, "chybějící otázky doplní pravidla")
+        self.assertEqual(len(d["faze1"]["questions"]), 6, "chybějící otázky doplní pravidla")
         zavolej(self.url, "/api/onboarding/start", "POST", {"ico": self.ico}, h)   # 2. volani = limit 2
         kod, raw, _ = zavolej(self.url, "/api/onboarding/start", "POST", {"ico": self.ico}, h)
         self.assertEqual(jj(raw)["agent"]["rezim"], "pravidla")

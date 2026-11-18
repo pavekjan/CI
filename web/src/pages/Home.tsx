@@ -14,7 +14,8 @@ export default function Home({ stav }: { stav: Stav | null }) {
   return (
     <div className="grid">
       <div className="hero">
-        <h1>Jak konkurenceschopná je firma ve veřejných zakázkách?</h1>
+        <div className="eyebrow"><b>OSINT</b> otevřená data státu · ISVZ · Registr smluv · ARES</div>
+        <h1>Jak <span className="grad">konkurenceschopná</span> je firma ve veřejných zakázkách?</h1>
         <p>Zadejte libovolnou firmu. TenderScope z otevřených dat státu spočítá, kolik vyhrává, za jaké ceny, u koho, proti komu a jak si stojí v segmentu.</p>
         <SearchBox autoFocus />
       </div>

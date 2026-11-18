@@ -57,7 +57,7 @@ class StazeniDB(unittest.TestCase):
         self.assertFalse(os.path.exists(self.cil))
 
     def test_stazeni_a_kontrola(self):
-        with mock.patch.object(server.bezpecnost, "over_api_url", lambda u, v: u):
+        with mock.patch.object(server.bezpecnost, "over_api_url", lambda u, v: u), mock.patch("time.sleep"):
             self.assertTrue(server.stahni_databazi(self.base + "tenderscope.db.gz", self.cil))
             con = sqlite3.connect(self.cil)
             self.assertEqual(con.execute("SELECT COUNT(*) FROM zakazky").fetchone()[0], 3)

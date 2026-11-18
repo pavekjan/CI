@@ -58,6 +58,14 @@ class Casti(unittest.TestCase):
             self.assertTrue(server.stahni_databazi("https://raw.githubusercontent.com/a/b/data/tenderscope.db.gz", cil))
         self.assertEqual(sqlite3.connect(cil).execute("SELECT COUNT(*) FROM zakazky").fetchone()[0], 3000)
 
+    def test_poskozene_stazeni_se_opakuje(self):
+        with mock.patch.object(server, "_stahni_databazi", side_effect=[None, None, True]) as st, mock.patch("time.sleep"):
+            self.assertTrue(server.stahni_databazi("https://x/tenderscope.db.gz", "c"))
+        self.assertEqual(st.call_count, 3)
+        with mock.patch.object(server, "_stahni_databazi", side_effect=[False]) as st, mock.patch("time.sleep") as sl:
+            self.assertFalse(server.stahni_databazi("https://x/tenderscope.db.gz", "c"))
+        sl.assert_not_called()
+
     def test_jedna_cast_jako_drive(self):
         d = tempfile.mkdtemp()
         gz = _db_gz(d)

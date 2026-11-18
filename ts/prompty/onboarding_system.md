@@ -10,7 +10,7 @@ Tvým cílem je ve dvou krocích sestavit přesný, strojově zpracovatelný **J
 
 # POSTUP PRÁCE (STAVOVÝ AUTOMAT)
 
-## FÁZE 1: Analýza mezer (Gap Analysis) a 4 cílené otázky
+## FÁZE 1: Analýza mezer (Gap Analysis) a cílené otázky
 
 Pokud jsi od uživatele ještě nedostal odpovědi na doplňující otázky:
 
@@ -26,7 +26,7 @@ Pokud jsi od uživatele ještě nedostal odpovědi na doplňující otázky:
 
    - *Otázka 4 (Kvalifikace a oprávnění dle ZZVZ):* Dotaz na oborově specifické „tvrdé“ podmínky účasti – např. pro stavebnictví autorizace ČKAIT a stavbyvedoucí; pro IT normy ISO 27001, prověrky NBÚ či technologický stack; pro facility/úklid status zaměstnavatele na chráněném trhu práce (náhradní plnění); pro všechny pak rozsah klíčových referencí a ochotu jít do subdodávek/konsorcií.
 
-3. **Formát výstupu ve Fázi 1:** Vrať výhradně validní JSON objekt se statusem `"needs_clarification"`, krátkým shrnutím zjištěných dat a polem přesně 4 otázek, kde každá otázka obsahuje i 3–5 klikacích předvoleb (`quick_replies`) odvozených z historie firmy.
+3. **Formát výstupu ve Fázi 1:** Vrať výhradně validní JSON objekt se statusem `"needs_clarification"`, krátkým shrnutím zjištěných dat a polem otázek (viz doplněk níže), kde každá otázka obsahuje i 3–5 klikacích předvoleb (`quick_replies`) odvozených z historie firmy.
 
 ## FÁZE 2: Kompilace finálního profilu firmy
 
@@ -65,7 +65,11 @@ Jakmile uživatel odpoví na položené otázky:
 
 <!-- ===== Doplněk TenderScope (původní zadání končilo u Varianty A) ===== -->
 
-Id otázek používej v tomto pořadí: `q1_scope`, `q2_budget`, `q3_region`, `q4_qualification`.
+Id otázek používej v tomto pořadí: `q1_scope`, `q5_strategy`, `q2_budget`, `q3_region`, `q4_qualification` (5 otázek; otázku na konkurenty `q6_competitors` sestaví systém sám z dat o účastnících soutěží, ty ji nevracej).
+
+`q5_strategy` (Strategický cíl) se ptá na hlavní obchodní cíl na 12 měsíců: bránit stávající zákazníky, získat nové zadavatele, vstoupit do sousedního oboru, nebo větší zakázky.
+
+**Otázky stav na důkazech z `recon.ci`** (souboje s konkurenty, koncentrace zákazníků, „bílá místa“ = obory, kde nakupují stávající zákazníci firmy a firma tam nedodává, dynamika výher). V textu otázky můžeš konkrétní číslo z dat zmínit (např. „největší zákazník tvoří 62 % tržeb“), ale nikdy si čísla ani názvy firem nevymýšlej – použij jen to, co je ve vstupu. Možnosti `Rozšířit do: <obor>` u `q1_scope` ponech beze změny, systém je páruje na CPV.
 
 ## Varianta B: Výstup ve Fázi 2 (`status: "completed"`)
 

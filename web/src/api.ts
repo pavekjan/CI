@@ -167,7 +167,19 @@ export interface AiLimity {
 export interface AiForm { llm_poskytovatel?: string; llm_klic?: string; llm_model?: string; llm_url?: string; llm_ucet?: string; ai_denni_limit?: number | string | null }
 
 // ---------------- onboarding
-export interface Otazka { id: string; category: string; question_text: string; quick_replies: string[]; allow_multiple: boolean }
+export interface Dukaz { text: string; zdroj: string; rating: string }
+export interface Otazka { id: string; category: string; question_text: string; quick_replies: string[]; allow_multiple: boolean; proc?: string; evidence?: Dukaz[] }
+export interface Zjisteni { text: string; zdroj: string; rating: string; jistota: string }
+export interface CiAnalyza {
+  souboje: { ico: string; nazev: string; stretu: number; my_vyhra: number; oni_vyhra: number }[];
+  lidri: { ico: string; nazev: string; objem: number; vyhry: number; segment: string }[];
+  koncentrace: { zakazniku: number; top_nazev: string; top_podil: number; top3_podil: number; hhi: number } | null;
+  bila_mista: { segment: string; objem: number; pocet: number; zakazniku: number; lidr: string | null }[];
+  trend: { posl12: number; pred12: number; do: string } | null;
+  zjisteni: Zjisteni[];
+}
+export interface Kandidat { ico: string; nazev: string | null; sidlo: string | null; zdroj: string; vyhry: number; ucasti: number; objem: number; smluv_rs: number }
+export interface NalezFirmy { dotaz: string; typ: "ico" | "web" | "nazev"; web: string | null; kandidati: Kandidat[]; poznamka: string | null }
 export interface Faze1 { status: "needs_clarification"; detected_summary: string; detected_vertical: string; questions: Otazka[] }
 export interface Zdroj { id: string; nazev: string; url: string | null; rating: string; ok: boolean }
 export interface Sidlo { adresa: string | null; mesto: string | null; nuts3: string | null; kraj: string | null; lat: number | null; lon: number | null; presnost: string | null }
@@ -185,6 +197,7 @@ export interface Recon {
   };
   web: { url: string; titulek?: string | null; popis?: string | null; chyba?: string } | null;
   zdroje: Zdroj[];
+  ci?: CiAnalyza;
 }
 export interface AgentInfo { rezim: "llm" | "claude" | "pravidla"; duvod?: string; poskytovatel?: string; model?: string; vstup_tokenu?: number; vystup_tokenu?: number }
 export interface Profil2 {
@@ -195,6 +208,8 @@ export interface Profil2 {
   budget: { min_czk: number | null; max_czk: number | null; vzmr_interest: boolean };
   min_prep_days: number; qualifications: string[]; consortium_ok: boolean; dealbreakers: string[]; obrat_czk?: number | null; cpv_zdroj?: string;
   whitelist_procurer_icos: string[]; blacklist_procurer_icos: string[];
+  strategy?: "stavajici" | "novi_zadavatele" | "nove_obory" | "vetsi_zakazky" | null;
+  watchlist?: { ico: string; nazev: string | null }[];
   sidlo?: Sidlo;
 }
 export interface Kriterium { klic: string; otazka: string; odpoved: string; skore: number | null; vaha: number; body?: number | null; km?: number; rucne?: boolean; uplynula?: boolean }
@@ -205,6 +220,7 @@ export interface PolozkaZpravodaje {
   datum: string | null; lhuta: string; otevrena: boolean; url: string | null; segment: string;
   skore: number; verdikt: string; ko: string[]; kriteria: Kriterium[]; zaklad?: number; srazky?: Srazka[];
   odkazy?: Odkaz[]; nipez_id?: string | null; nen_cislo?: string | null; vvz_cislo?: string | null;
+  sledovani?: { ico: string; nazev: string; vyher: number }[]; cil?: string | null;
 }
 export interface Zpravodaj { od: string | null; do: string | null; poznamka: string | null; kandidatu: number; doporuceno?: number; polozky: PolozkaZpravodaje[] }
 export interface OnbStav { ico: string; recon: Recon | null; faze1: Faze1 | null; odpovedi: Record<string, Odpoved> | null; profil: Profil2 | null; zpravodaj?: Zpravodaj; upraveno: string }
@@ -269,6 +285,7 @@ async function get<T>(url: string): Promise<T> {
 export const api = {
   stav: () => get<Stav>("/api/stav"),
   hledat: (q: string) => get<Hit[]>(`/api/hledat?q=${encodeURIComponent(q)}`),
+  najdiFirmu: (q: string) => get<NalezFirmy>(`/api/najdi_firmu?q=${encodeURIComponent(q)}`),
   firma: (ico: string) => get<Profil>(`/api/firma/${encodeURIComponent(ico)}`),
   graf: (ico: string) => get<Graf>(`/api/graf/${encodeURIComponent(ico)}`),
   trh: (segment?: string | null) => get<Trh>(`/api/trh${segment ? `?segment=${encodeURIComponent(segment)}` : ""}`),

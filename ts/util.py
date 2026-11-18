@@ -296,4 +296,9 @@ def nuts_to_kraj(nuts):
             return v
     if n in ("CZ0", "CZ"):
         return "celá ČR"
-    return n
+    # NUTS 2 (regiony soudrznosti): Praha, Stredocesky a Moravskoslezsky jsou zaroven kraje
+    nuts2 = {"CZ01": "Hlavní město Praha", "CZ02": "Středočeský", "CZ03": "Jihozápad (Jihočeský, Plzeňský)",
+             "CZ04": "Severozápad (Karlovarský, Ústecký)", "CZ05": "Severovýchod (Liberecký, Královéhradecký, Pardubický)",
+             "CZ06": "Jihovýchod (Vysočina, Jihomoravský)", "CZ07": "Střední Morava (Olomoucký, Zlínský)",
+             "CZ08": "Moravskoslezský"}
+    return nuts2.get(n[:4], n)
