@@ -113,3 +113,25 @@ class OdhadOboru(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FirmaBezHistorie(unittest.TestCase):
+    def test_instalater_dostane_sve_obory_ne_uklid(self):
+        rc = _rc([], vyher=0)
+        rc["nazev"] = "EM - Instalace s.r.o."
+        rc["ares"] = {"nace": "25720,43,43120,4322,43220,46900,6820,8122,952"}
+        rc["historie"].update(median_zakazky_czk=None, p25_czk=None, p75_czk=None, p90_czk=None, max_czk=None)
+        f1 = onboarding.faze1_pravidla(rc)
+        q = {x["id"]: x for x in f1["questions"]}
+        self.assertEqual(q["q1_scope"]["question_text"], "Čím se vaše firma hlavně živí?")
+        self.assertTrue(q["q1_scope"]["quick_replies"][0].startswith("Instalatérské"))  # podle nazvu firmy
+        self.assertNotIn("q6_competitors", q)  # bez dat neni koho nabidnout
+        self.assertTrue(any("F-plyny" in o for o in q["q4_qualification"]["quick_replies"]))
+        odp = {"q1_scope": {"vybrano": [q["q1_scope"]["quick_replies"][0]], "text": ""},
+               "q5_strategy": {"vybrano": ["Začít jako subdodavatel větší firmy"], "text": ""}}
+        p = onboarding.faze2_pravidla(rc, f1, odp)["company_profile"]
+        self.assertIn("45331220", p["cpv_codes"]["main"])
+        self.assertFalse([c for c in p["cpv_codes"]["main"] + p["cpv_codes"]["secondary"] if c.startswith("909")])  # zadny uklid
+        self.assertIn("klimatizace", p["keywords"])
+        self.assertTrue(p["consortium_ok"])
+        self.assertEqual(p["strategy"], "novi_zadavatele")

@@ -538,7 +538,11 @@ def _ci(con, ico, hist):
         a, b = (ref - timedelta(days=365)).isoformat(), (ref - timedelta(days=730)).isoformat()
         r = con.execute("""SELECT SUM(z.datum_zahajeni > ?), SUM(z.datum_zahajeni > ? AND z.datum_zahajeni <= ?)
                            FROM vitezove v JOIN zakazky z ON z.id=v.zakazka_id WHERE v.dodavatel_ico=?""", (a, b, a, ico)).fetchone()
-        out["trend"] = {"posl12": r[0] or 0, "pred12": r[1] or 0, "do": ref.isoformat()}
+        t = con.execute("""SELECT SUM(z.datum_zahajeni > ?), SUM(z.datum_zahajeni > ? AND z.datum_zahajeni <= ?)
+                           FROM vitezove v JOIN zakazky z ON z.id=v.zakazka_id WHERE z.datum_zahajeni > ?""", (a, b, a, b)).fetchone()
+        # u nejnovejsich soutezi jeste neni znam vitez -> firma se porovnava s vyvojem celeho trhu
+        out["trend"] = {"posl12": r[0] or 0, "pred12": r[1] or 0, "do": ref.isoformat(),
+                        "trh": ((t[0] or 0) / t[1]) if t and t[1] else 1.0}
 
     # 6) klicova zjisteni (zdroj + hodnoceni duveryhodnosti podle Admiralty kodu + jistota zaveru)
     zj = out["zjisteni"]
@@ -566,8 +570,10 @@ def _ci(con, ico, hist):
                    "zdroj": "ISVZ (vítězové u vašich zákazníků)", "rating": "A1", "jistota": "střední"})
     t = out["trend"]
     if t and (t["posl12"] or t["pred12"]):
-        zm = "roste" if t["posl12"] > t["pred12"] * 1.2 else "klesá" if t["posl12"] < t["pred12"] * 0.8 else "je stabilní"
-        zj.append({"text": f"Počet vyhraných soutěží {zm}: {t['posl12']} za posledních 12 měsíců dat vs. {t['pred12']} v předchozích 12.",
+        rel = ((t["posl12"] + 1) / (t["pred12"] + 1)) / (t.get("trh") or 1.0)
+        zm = "rostou rychleji než trh" if rel > 1.2 else "klesají víc než trh" if rel < 0.8 else "se vyvíjejí podobně jako trh"
+        zj.append({"text": f"Vaše výhry {zm}: {t['posl12']} za posledních 12 měsíců dat vs. {t['pred12']} v předchozích 12 "
+                           f"(celý trh {(t.get('trh', 1.0) - 1) * 100:+.0f} %).",
                    "zdroj": "ISVZ", "rating": "A1", "jistota": "střední" if t["posl12"] + t["pred12"] >= 5 else "nízká"})
     out["souboje_n"] = n_s
     out["porter"] = _porter(con, ico, hist, out)
@@ -714,7 +720,7 @@ NACE_CPV = {
     "4299": ("Inženýrské stavby", ["45220000"]), "4311": ("Demolice", ["45110000", "45111100"]),
     "4312": ("Příprava staveniště, zemní práce", ["45111000", "45112000"]),
     "4321": ("Elektroinstalace", ["45310000", "45311000", "45315000"]),
-    "4322": ("Instalatérské práce, topení, VZT", ["45330000", "45331000", "45332000"]),
+    "4322": ("Instalatérské práce, topení, klimatizace a vzduchotechnika", ["45331000", "45331220", "45332000", "45330000", "42512000", "50730000"]),
     "4329": ("Ostatní stavební instalace", ["45350000"]), "4331": ("Omítky a štukatérské práce", ["45410000"]),
     "4332": ("Truhlářské práce, okna, dveře", ["45420000", "45421000"]), "4333": ("Podlahy a obklady", ["45430000"]),
     "4334": ("Malířské a natěračské práce", ["45440000", "45442100"]), "4339": ("Dokončovací práce", ["45450000"]),
@@ -738,15 +744,42 @@ NACE_CPV = {
 }
 
 
+# slova, podle kterych se pozna zakazka pro danou cinnost (pro firmy bez historie: textova shoda se zakazkami)
+NACE_SLOVA = {
+    "4322": ["klimatizace", "vzduchotechnika", "topení", "vytápění", "tepelné čerpadlo", "zdravotechnika", "rozvody vody", "kotelna"],
+    "4321": ["elektroinstalace", "rozvody", "osvětlení", "hromosvod", "revize elektro"],
+    "4120": ["rekonstrukce budovy", "stavební úpravy", "novostavba", "přístavba"],
+    "4211": ["silnice", "chodník", "komunikace", "parkoviště"], "4221": ["vodovod", "kanalizace", "čistírna"],
+    "4391": ["střecha", "střešní plášť", "klempířské"], "4332": ["okna", "dveře", "truhlářské"], "4334": ["malování", "nátěry"],
+    "8121": ["úklid", "úklidové služby", "čištění"], "8122": ["mytí oken", "čištění fasád", "dezinfekce"],
+    "8129": ["deratizace", "dezinsekce", "dezinfekce", "čištění komunikací"], "8130": ["údržba zeleně", "sečení", "kácení"],
+    "8010": ["ostraha", "bezpečnostní služby", "recepce"], "6201": ["vývoj software", "aplikace", "informační systém"],
+    "5610": ["stravování", "catering", "jídelna"], "3811": ["svoz odpadu", "odpady"],
+}
+
+
 def nace_cpv(rc):
-    """[(popis, [cpv...]), ...] podle NACE z ARES, v poradi (prvni = hlavni cinnost)."""
-    out = []
+    """[(popis, [cpv...]), ...] podle NACE z ARES. ARES cinnosti neradi podle dulezitosti, proto se nahoru dava
+    cinnost, ktera odpovida nazvu firmy (EM - Instalace -> instalace), pak presnejsi (5mistne) kody."""
+    out, kody = [], []
     for n in ((rc.get("ares") or {}).get("nace") or "").split(","):
         n = n.strip()
         hit = NACE_CPV.get(n[:4]) if len(n) >= 4 else None  # 2-3mistny kod je moc obecny
         if hit and hit not in out:
             out.append(hit)
-    return out
+            kody.append(n[:4])
+    jmeno = [w[:5] for w in norm(rc.get("nazev") or "").split() if len(w) >= 5]
+    def skore(i):
+        slova = norm(out[i][0] + " " + " ".join(NACE_SLOVA.get(kody[i], [])))
+        return -sum(1 for w in jmeno if w in slova)
+    poradi = sorted(range(len(out)), key=lambda i: (skore(i), i))
+    return [out[i] for i in poradi]
+
+
+def nace_slova(rc, popisy):
+    """Klicova slova k vybranym cinnostem (podle popisu z nace_cpv)."""
+    kod = {v[0]: k for k, v in NACE_CPV.items()}
+    return [w for p in popisy for w in NACE_SLOVA.get(kod.get(p), [])]
 
 
 VERT_NAZEV = {"stavebnictvi": "stavebnictví", "it_sw": "IT a software", "facility_sluzby": "facility a služby",
@@ -786,6 +819,16 @@ def kc(x):
 
 # ------------------------------------------------------------------ 2a. FAZE 1 (pravidlovy zaloznik)
 SPOLEC = "Půjdeme i se společníkem / subdodavatelem"
+# Co zadavatele chteji u remesel (firmy bez historie poznane podle cinnosti v ARES)
+KVAL_NACE = {
+    "4322": ["Certifikát pro práci s chladivy (F-plyny)", "Oprávnění na plynová zařízení", "Revizní technik",
+             "Reference z veřejných budov (školy, úřady)", "ISO 9001", SPOLEC],
+    "4321": ["Odborná způsobilost v elektrotechnice", "Revizní technik elektro", "Reference z veřejných budov",
+             "ISO 9001", SPOLEC],
+    "8121": ["Náhradní plnění (chráněný trh práce)", "Pojištění odpovědnosti", "Reference u nemocnic / úřadů", "ISO 9001", SPOLEC],
+    "8129": ["Odborná způsobilost pro deratizaci a dezinsekci", "Pojištění odpovědnosti", "Reference u nemocnic / úřadů",
+             "ISO 9001", SPOLEC],
+}
 # Co zadavatele u dodavek zbozi typicky chteji, podle toho, co firma prodava (oddil CPV)
 KVAL_ZBOZI = {
     "15": ["Kontrola kvality potravin (HACCP, IFS)", "Vlastní chlazená doprava", "Dodávky každý den, i o víkendu",
@@ -838,7 +881,7 @@ def faze1_pravidla(rc):
                 if h["median_zakazky_czk"] else "")
     elif ob:
         shr += (f"– ve veřejných zakázkách zatím žádnou výhru nevidím. Podle živností zapsaných v ARES jde hlavně o: "
-                f"{_vyjmenuj([o['nazev'].lower() for o in ob])}. ")
+                f"{'; '.join(o['nazev'].lower() for o in ob)}. ")
     else:
         shr += "– ve veřejných zakázkách zatím žádnou výhru nevidím a z rejstříků nepoznám, co firma dělá. Napište to prosím do první otázky. "
     if h["registr_smluv"]["pocet"]:
@@ -854,7 +897,11 @@ def faze1_pravidla(rc):
     # "Nechceme" jen u oboru, ktery mezi nabizenymi neni (Siemens nema dostat "Stavební práce" i "Nechceme: stavební práce")
     nabidnute = {norm(x) for x in q1}
     neg1 = [n for n in VERT_NEG[vert] if norm(n) not in nabidnute and not any(norm(n) in x or x in norm(n) for x in nabidnute)]
-    q1 = q1 + [f"Nechceme: {neg1[0]}"] if neg1 else q1
+    bez_historie = not [x for x in h["segmenty"] if x["segment"] != "neuvedeno"]
+    if bez_historie:
+        q1 = [p for p, _ in nace_cpv(rc)[:5]] or q1  # u firmy bez zakazek nejdriv zjistit, co vubec dela
+    else:
+        q1 = q1 + [f"Nechceme: {neg1[0]}"] if neg1 else q1
 
     med = h["median_zakazky_czk"]
     q2 = ["Malé zakázky do 6 mil. Kč" if vert == "stavebnictvi" else "Malé zakázky do 2 mil. Kč", "2–10 mil. Kč", "10–50 mil. Kč", "nad 50 mil. Kč"]
@@ -889,13 +936,17 @@ def faze1_pravidla(rc):
           "dodavky_zbozi": KVAL_ZBOZI.get((idn["obory"] or [{}])[0].get("oddil"), KVAL_ZBOZI[None]),
           "poradenstvi": ["Odborná způsobilost / autorizace", "Reference ve veřejné správě", "ISO 9001", "Klíčoví experti s praxí 5+ let", "Půjdeme i se společníkem / subdodavatelem"],
           "jine": ["ISO 9001", "Reference ve veřejné správě", "Půjdeme i se společníkem / subdodavatelem"]}[vert]
+    if bez_historie:
+        kod = {v[0]: k for k, v in NACE_CPV.items()}.get((nace_cpv(rc) or [("", [])])[0][0])
+        q4 = KVAL_NACE.get(kod, q4)
+        q2 = ["Do 500 tis. Kč", "0,5–2 mil. Kč", "2–10 mil. Kč", "10–50 mil. Kč", "nad 50 mil. Kč"]
 
     ci = rc.get("ci") or {}
     seg_ev = [f"{x['segment']}: {x['pocet']} " + ("výhra" if x["pocet"] == 1 else "výhry" if x["pocet"] < 5 else "výher")
               for x in h["segmenty"][:3]]
     ev1 = ([{"text": "V čem jste dosud vyhrávali: " + "; ".join(x.split(" ", 1)[-1] for x in seg_ev), "zdroj": "ISVZ", "rating": "A1"}] if seg_ev else
-           [{"text": "Ve veřejných zakázkách zatím nemáte historii – obory beru z živností v ARES" + (" a z vašeho webu." if rc.get("web") else "."),
-             "zdroj": "ARES", "rating": "A1"}])
+           [{"text": "Ve veřejných zakázkách zatím nemáte žádnou výhru, proto nevím jistě, co děláte. Nabízím činnosti, "
+                     "které máte zapsané v ARES (firmy jich mívají zapsaných víc, než opravdu dělají).", "zdroj": "ARES", "rating": "A1"}])
     neg_n = {norm(n) for n in VERT_NEG[vert]}
     for b in [b for b in (ci.get("bila_mista") or []) if norm(b["segment"].split(" ", 1)[-1]) not in neg_n][:2]:
         konec = len(q1) - 1 if q1 and q1[-1].startswith("Nechceme") else len(q1)
@@ -922,6 +973,8 @@ def faze1_pravidla(rc):
                "Proniknout do nového oboru", "Získávat větší zakázky"]
     if k and k["top_podil"] >= 0.4:
         q_strat[1] += " (být méně závislí na jednom úřadu)"
+    if bez_historie:
+        q_strat = ["Získat první zakázky od státu", "Začít jako subdodavatel větší firmy", "Zatím jen sledovat, co stát poptává"]
 
     # konkurenti ke sledovani: primi soupeři z ucasti, jinak lidri segmentu
     sb = ci.get("souboje") or []
@@ -934,7 +987,6 @@ def faze1_pravidla(rc):
         q_konk = [f"{x['nazev'][:60]} – největší dodavatel v oboru {x['segment'].split(' ', 1)[-1]}" for x in (ci.get("lidri") or [])[:5]]
         ev_k = [{"text": "U vašich soutěží data neuvádějí, kdo další se přihlásil – nabízím proto největší firmy ve vašem oboru.",
                  "zdroj": "ISVZ (vítězové)", "rating": "A1"}] if q_konk else []
-    q_konk = q_konk or ["Zatím nikoho – konkurenty doplním později"]
 
     ev2 = ([{"text": f"8 z 10 vašich vyhraných zakázek mělo hodnotu {kc(_od(h))} – {kc(_do(h))}, nejčastěji kolem {kc(med)}. "
                      f"Největší byla za {kc(h['max_czk'])}.",
@@ -955,14 +1007,19 @@ def faze1_pravidla(rc):
         "detected_summary": shr.strip(),
         "detected_vertical": vert,
         "questions": [
+            ot("q1_scope", "Co děláte", "Čím se vaše firma hlavně živí?",
+               q1, True, "Vyberte jen to, co opravdu děláte – podle toho hledám zakázky. Když tu vaše činnost není, napište ji "
+                         "vlastními slovy (třeba „montáž klimatizací“).", ev1) if bez_historie else
             ot("q1_scope", "Co dodáváte", "Jaké zakázky chcete dostávat a jaké ne?",
                q1, True, "Označte obory, ze kterých chcete zakázky. „Nově i“ je obor, kde zatím nedodáváte, ale vaši zákazníci "
                          "ho kupují od konkurence. Co označíte „Nechceme“, to se vám ukazovat nebude.", ev1),
             ot("q5_strategy", "Cíl", "Čeho chcete ve veřejných zakázkách dosáhnout v příštím roce?",
-               q_strat, False, "Podle toho dám nahoru buď zakázky od vašich stávajících zákazníků, nebo od nových, nebo z nového oboru.", ev_s),
-            ot("q6_competitors", "Konkurence", "Které konkurenty chcete hlídat?",
-               q_konk, True, "Když vypíše zakázku úřad, u kterého tahle firma už dřív vyhrála, upozorním vás. "
-                             "Víte pak, s kým v soutěži nejspíš budete a s jakou cenou počítat.", ev_k),
+               q_strat, False, ("Podle toho řadím zakázky ve zpravodaji. Jako subdodavatel můžete jít i do větších zakázek, "
+                                "které byste sami nesplnili." if bez_historie else
+                                "Podle toho dám nahoru buď zakázky od vašich stávajících zákazníků, nebo od nových, nebo z nového oboru."), ev_s),
+            *([ot("q6_competitors", "Konkurence", "Které konkurenty chcete hlídat?",
+                  q_konk, True, "Když vypíše zakázku úřad, u kterého tahle firma už dřív vyhrála, upozorním vás. "
+                                "Víte pak, s kým v soutěži nejspíš budete a s jakou cenou počítat.", ev_k)] if q_konk else []),
             ot("q2_budget", "Velikost zakázek", "Jak velké zakázky chcete?",
                q2, True, "Zakázky, které jsou pro vás moc malé nebo moc velké, schovám.", ev2),
             ot("q2_prep", "Čas na nabídku", "Kolik dní nejméně potřebujete na přípravu nabídky?",
@@ -1039,9 +1096,8 @@ def faze2_pravidla(rc, f1, odp):
         main += [c for c in codes if c not in main]
     main = (main[:7] + [c for c in rozsirit if c not in main[:7]])[:9] or VERT_CPV_DEFAULT[vert][:2]
     secondary = [c["cpv"] for c in h["top_cpv"] if c["cpv"] not in main][:8]
-    if not ma_historii:
-        secondary += [c for _, codes in nc for c in codes if c not in main and c not in secondary]
-    secondary = secondary[:10] or VERT_CPV_DEFAULT[vert][2:]
+    # firma bez historie: jen cinnosti, ktere si vybrala (ne vsech 10 zivnosti z ARES - jinak by dostala i uklid)
+    secondary = secondary[:10] or ([] if vybrane_nace else VERT_CPV_DEFAULT[vert][2:])
 
     # Q2 rozpocet + priprava (dny: samostatna otazka q2_prep; starsi format je mel v q2_budget)
     sel2, txt2 = _odpoved_text(odp, "q2_budget")
@@ -1116,12 +1172,14 @@ def faze2_pravidla(rc, f1, odp):
     sel4, txt4 = _odpoved_text(odp, "q4_qualification")
     kval = [x for x in sel4 if "konsorc" not in norm(x) and "subdod" not in norm(x)]
     kval += [k.strip() for k in re.split(r"[;,\n]", txt4) if k.strip()]
-    konsorcium = any("konsorc" in norm(x) or "subdod" in norm(x) for x in sel4) or "konsorc" in norm(txt4)
+    konsorcium = (any("konsorc" in norm(x) or "subdod" in norm(x) for x in sel4) or "konsorc" in norm(txt4)
+                  or "subdodav" in norm(" ".join(_odpoved_text(odp, "q5_strategy")[0])))
 
     # Q5 strategicky cil
     sel5, txt5 = _odpoved_text(odp, "q5_strategy")
     v5 = norm(" ".join(sel5) + " " + txt5)
-    strategie = ("stavajici" if "stavajic" in v5 or "branit" in v5
+    strategie = ("novi_zadavatele" if "prvni zakazky" in v5 or "subdodav" in v5 else None) or (
+                 "stavajici" if "stavajic" in v5 or "branit" in v5
                  else "novi_zadavatele" if "nove zadavatele" in v5 or "nove zakazniky" in v5
                  else "nove_obory" if "sousedni" in v5 or "obor" in v5 else "vetsi_zakazky" if "vetsi" in v5 else None)
     if strategie == "vetsi_zakazky" and hi:
@@ -1152,6 +1210,9 @@ def faze2_pravidla(rc, f1, odp):
     stopz = {norm(z["nazev"] or "") for z in h["top_zadavatele"]}
     kw = [w for w, _ in Counter(w for w in norm(txt).split()
                                 if len(w) > 4 and w not in STOP_KW and not w.isdigit() and not any(w in z for z in stopz)).most_common(12)]
+    if not ma_historii:  # firma bez zakazek: slova typicka pro vybrane cinnosti (klimatizace, vzduchotechnika...)
+        vybrane = [label for label, _ in nc if norm(label) in chci_seg] or [label for label, _ in nc[:1]]
+        kw = list(dict.fromkeys(nace_slova(rc, vybrane) + kw))[:15]
 
     seg_txt = ", ".join(CPV_DIV.get(c[:2], c) for c in dict.fromkeys(c[:2] for c in main))
     web = rc.get("web") or {}

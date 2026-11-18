@@ -76,12 +76,15 @@ export default function Onboarding({ ico }: { ico: string | null }) {
     setRecon(null); setF1(null); setProfil(null); setZprav(null); setErr(null); setAgent1(null); setAgent2(null);
     if (!ico) return;
     setBusy({ kde: "start", kroky: ["Načítám uložený profil"] });
+    let znovu = false;
     api.onbStav(ico)
       .then((s) => {
+        // profil ulozeny starsi verzi (jine otazky) -> rovnou spustit znovu s aktualnimi otazkami
+        if (s.faze1 && !s.faze1.questions.some((q) => q.id === "q2_prep")) { znovu = true; return; }
         setRecon(s.recon); setF1(s.faze1); setOdp(s.odpovedi ?? {}); setProfil(s.profil); setZprav(s.zpravodaj ?? null);
       })
       .catch((e) => setErr(String(e.message ?? e)))
-      .finally(() => setBusy(null));
+      .finally(() => { setBusy(null); if (znovu) start(ico, ""); });
   }, [ico]);
 
   const start = async (i: string, web: string) => {
@@ -133,7 +136,7 @@ export default function Onboarding({ ico }: { ico: string | null }) {
         <h1>Onboarding firmy a Day-0 zpravodaj</h1>
         <p className="secondary" style={{ margin: "6px 0 0" }}>
           Zadejte IČO, název nebo web. Agent z otevřených zdrojů (ARES, ISVZ, Registr smluv, web) sestaví zpravodajský obraz firmy a jejích
-          konkurentů, položí 6 otázek podložených daty, sestaví profil a hned ukáže zakázky, které firmu mají zajímat.
+          konkurentů, položí pár otázek podložených daty, sestaví profil a hned ukáže zakázky, které firmu mají zajímat.
         </p>
       </div>
       <StartForm initial={ico ?? ""} onStart={start} disabled={!!busy} />

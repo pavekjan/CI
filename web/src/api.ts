@@ -75,6 +75,8 @@ export interface Profil {
     smluv_rs_souhrn?: number;
     objem_rs_souhrn?: number;
     overeno_rs: number;
+    podil_trhu?: { obor: string; podil: number; poradi: number | null; dodavatelu: number } | null;
+    nejvetsi_zakaznik?: { nazev: string; podil: number; zakazniku: number } | null;
   };
   registr?: {
     pocet: number;

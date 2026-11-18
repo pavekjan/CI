@@ -99,6 +99,10 @@ class SkoreSRegistrem(unittest.TestCase):
         self.assertTrue(sk["uspesnost"]["malo_dat"])
         self.assertIn("Registr smluv", sk["pozice"]["vysvetleni"])
         self.assertGreater(sk["klienti"]["skore"], 60)              # 68 zakazniku
+        nz = p["kpi"]["nejvetsi_zakaznik"]                          # samostatne KPI zavislosti na zakaznikovi
+        self.assertEqual(nz["zakazniku"], 68)
+        self.assertAlmostEqual(nz["podil"], 1 / 68, places=3)
+        self.assertIsNone(p["kpi"]["podil_trhu"])                   # bez vyher neni podil na trhu
         self.assertGreater(p["skore"]["celkem"], 40)
         self.assertTrue(p["skore"]["malo_dat"])
         json.dumps(p, default=str)

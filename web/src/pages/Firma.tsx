@@ -178,7 +178,7 @@ export default function Firma({ ico, prazdnaDb }: { ico: string; prazdnaDb?: boo
           {/* KPI */}
           <div className="grid g4">
             <Kpi label="Vyhrané soutěže" value={num(k.vyhry)} note={`${num(k.ucasti)} účastí celkem`} />
-            <Kpi label="Win rate" value={pct(k.win_rate)} note={k.win_rate === null ? "zdroj neuvádí neúspěšné nabídky" : `ze ${num(k.ucasti_zname)} soutěží se známými účastníky`} />
+            <Kpi label="Úspěšnost (win rate)" value={pct(k.win_rate)} note={k.win_rate === null ? "zdroj neuvádí neúspěšné nabídky" : `ze ${num(k.ucasti_zname)} soutěží se známými účastníky`} />
             <Kpi label="Objem výher (bez DPH)" value={kc(k.objem)} note={`medián zakázky ${kc(k.median_cena)}`} />
             <Kpi label="Cena vs. předpokládaná hodnota" value={pct(k.median_pomer)} note={`trh ve stejných segmentech ${pct(k.trh_median_pomer)}`} />
           </div>
@@ -189,6 +189,18 @@ export default function Firma({ ico, prazdnaDb }: { ico: string; prazdnaDb?: boo
               note={`${kc(Math.max(k.objem_rs_souhrn ?? 0, k.objem_rs))}${p.registr ? ` · ${num(p.registr.zadavatelu)} odběratelů` : ""}`} />
             <Kpi label="Výhry ověřené v Registru smluv" value={k.vyhry ? pct(k.overeno_rs / k.vyhry) : "–"} note={`${k.overeno_rs} z ${k.vyhry} (křížová kontrola)`} />
           </div>
+          {(k.podil_trhu || k.nejvetsi_zakaznik) && (
+            <div className="grid g2">
+              {k.podil_trhu && (
+                <Kpi label="Podíl na trhu v hlavním oboru" value={pct(k.podil_trhu.podil, k.podil_trhu.podil < 0.1 ? 1 : 0)}
+                  note={`${k.podil_trhu.obor}${k.podil_trhu.poradi ? ` · ${k.podil_trhu.poradi}. z ${num(k.podil_trhu.dodavatelu)} dodavatelů` : ""} · z objemu všech vyhraných soutěží v oboru`} />
+              )}
+              {k.nejvetsi_zakaznik && (
+                <Kpi label="Závislost na největším zákazníkovi" value={pct(k.nejvetsi_zakaznik.podil)}
+                  note={`${k.nejvetsi_zakaznik.nazev} · ${k.nejvetsi_zakaznik.podil >= 0.5 ? "vysoké riziko při jeho ztrátě" : k.nejvetsi_zakaznik.podil >= 0.25 ? "střední riziko" : "nízké riziko"} · ${k.nejvetsi_zakaznik.zakazniku === 1 ? "jediný známý veřejný zákazník" : `z ${num(k.nejvetsi_zakaznik.zakazniku)} veřejných zákazníků (soutěže + Registr smluv)`}`} />
+              )}
+            </div>
+          )}
 
           {p.registr && p.registr.pocet > 0 && (
             <div className="grid g2">

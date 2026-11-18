@@ -537,6 +537,28 @@ def _segment_stats(con, today):
     return seg
 
 
+def _konec_dat(con):
+    """Posledni den, za ktery maji data zakazky (ne budouci terminy z preklepu)."""
+    d = con.execute("SELECT MAX(datum_zahajeni) FROM zakazky WHERE datum_zahajeni <= ?", (date.today().isoformat(),)).fetchone()[0]
+    try:
+        return date.fromisoformat(d[:10]) if d else date.today()
+    except ValueError:
+        return date.today()
+
+
+def _trh_dynamika(con, ref):
+    """Kolik vyher a smluv mel cely trh v poslednich 6 mesicich dat a v 6 mesicich predtim (pro srovnani firmy s trhem)."""
+    t6, t12 = (ref - timedelta(days=183)).isoformat(), (ref - timedelta(days=366)).isoformat()
+    a, b = con.execute("""SELECT SUM(z.datum_zahajeni >= ? AND z.datum_zahajeni <= ?), SUM(z.datum_zahajeni >= ? AND z.datum_zahajeni < ?)
+                          FROM vitezove v JOIN zakazky z ON z.id=v.zakazka_id WHERE z.datum_zahajeni >= ?""",
+                       (t6, ref.isoformat(), t12, t6, t12)).fetchone()
+    m6, m12, m0 = t6[:7], t12[:7], ref.isoformat()[:7]
+    ra, rb = con.execute("""SELECT SUM(CASE WHEN mesic >= ? AND mesic < ? THEN pocet ELSE 0 END),
+                                   SUM(CASE WHEN mesic >= ? AND mesic < ? THEN pocet ELSE 0 END)
+                            FROM smlouvy_souhrn WHERE mesic >= ? AND mesic < ?""", (m6, m0, m12, m6, m12, m0)).fetchone()
+    return {"vyhry_nove": a or 0, "vyhry_stare": b or 0, "rs_nove": ra or 0, "rs_stare": rb or 0}
+
+
 def profil(con, ico, cfg, today=None, online=True):
     today = today or date.today()
     ico = clean_ico(ico)
@@ -674,10 +696,14 @@ def profil(con, ico, cfg, today=None, online=True):
     jedna = sum(1 for n in nab if n == 1)
 
     # ---- trend: poslednich 6 mesicu vs predchozich 6 ----
-    t6 = (today - timedelta(days=183)).isoformat()
-    t12 = (today - timedelta(days=366)).isoformat()
-    nove = sum(1 for w in wins if (w["datum_zahajeni"] or "") >= t6)
+    # Okna se pocitaji od konce dat, ne od dneska. U nejcerstvejsich soutezi jeste neni znam vitez, takze vyher
+    # v poslednich mesicich je v datech vzdy mene - firma se proto porovnava s celym trhem ve stejnych oknech.
+    ref = min(today, _konec_dat(con))
+    t6 = (ref - timedelta(days=183)).isoformat()
+    t12 = (ref - timedelta(days=366)).isoformat()
+    nove = sum(1 for w in wins if t6 <= (w["datum_zahajeni"] or "") <= ref.isoformat())
     stare = sum(1 for w in wins if t12 <= (w["datum_zahajeni"] or "") < t6)
+    trh_dyn = _cached(con, f"dynamika:{ref.isoformat()}", lambda: _trh_dynamika(con, ref))
 
     # ---- skore konkurenceschopnosti ----
     rs_souhrn = rs_firmy(con, ico)
@@ -693,7 +719,8 @@ def profil(con, ico, cfg, today=None, online=True):
         sc = _clamp(50 + (wr_adj - trh_wr) * 150)
         malo = n_z < 5
         slozky.append({"klic": "uspesnost", "nazev": "Úspěšnost v soutěžích", "vaha": 25, "skore": round(sc), "malo_dat": malo,
-                       "vysvetleni": f"Win rate {_pc(win_rate)} ({v_z} z {n_z} soutěží se známými účastníky); medián trhu {_pc(trh_wr)}."
+                       "vysvetleni": f"Vyhrála {_pc(win_rate)} soutěží, kterých se účastnila ({v_z} z {n_z}, kde zdroj uvádí všechny účastníky); "
+                                     f"běžná firma na trhu vyhraje {_pc(trh_wr)}."
                                      + (f" Málo dat: odhad je přitažený k mediánu trhu (jako by firma měla navíc {K_SHRINK} "
                                         f"průměrných soutěží), upravený win rate {_pc(wr_adj)}." if malo else "")})
     elif ucast_ids:
@@ -712,16 +739,23 @@ def profil(con, ico, cfg, today=None, online=True):
         sc = _clamp(0.7 * pr + 0.3 * por) if por is not None else _clamp(pr)
         slozky.append({"klic": "pozice", "nazev": "Tržní pozice", "vaha": 25, "skore": round(sc),
                        "vysvetleni": f"Veřejné tržby {_kc(verejne)} (soutěže {_kc(objem)} + Registr smluv {_kc(rs_objem)}) "
-                                     f"jsou vyšší než u {pr:.0f} % dodavatelů."
-                                     + ((f" V hlavním segmentu {top['segment']} " + (f"{top['poradi']}. z {top['dodavatelu']} dodavatelů." if top['poradi'] else f"mezi {top['dodavatelu']} dodavateli."))
+                                     + (f"patří mezi 1 % největších dodavatelů." if pr >= 99 else f"jsou vyšší než u {pr:.0f} % dodavatelů.")
+                                     + ((f" V hlavním oboru {top['segment'].split(' ', 1)[-1].lower()} " + (f"{top['poradi']}. z {top['dodavatelu']} dodavatelů." if top['poradi'] else f"mezi {top['dodavatelu']} dodavateli."))
                                         if top else "")})
     # 3 cena
-    if med_pomer is not None and trh_med_pomer is not None and len(ceny) >= 2:
+    # z 2-3 zakazek se o cenach nic spolehliveho rict neda (Makro: 2 z 891) -> slozka az od 5 zakazek
+    if med_pomer is not None and trh_med_pomer is not None and len(ceny) >= 5:
         diff = trh_med_pomer - med_pomer
         sc = _clamp(50 + diff * 400)
-        slozky.append({"klic": "cena", "nazev": "Cenová konkurenceschopnost", "vaha": 20, "skore": round(sc),
-                       "vysvetleni": f"Vítězí v mediánu za {_pc(med_pomer)} předpokládané hodnoty, trh v týchž segmentech za {_pc(trh_med_pomer)} "
-                                     f"({len(ceny)} zakázek se skutečnou cenou; rámcové dohody a ceny shodné s odhadem nepočítáme)."})
+        n_c = len(ceny)
+        slozky.append({"klic": "cena", "nazev": "Cenová konkurenceschopnost", "vaha": 20, "skore": round(sc), "malo_dat": n_c < 10,
+                       "vysvetleni": f"Vítězí v mediánu za {_pc(med_pomer)} předpokládané hodnoty, trh v týchž oborech za {_pc(trh_med_pomer)} "
+                                     f"(spočteno z {n_c} {'zakázky' if n_c == 1 else 'zakázek'} se skutečnou cenou; rámcové dohody "
+                                     f"a ceny shodné s odhadem nepočítáme)." + (" Málo dat, berte orientačně." if n_c < 10 else "")})
+    elif ceny:
+        slozky.append({"klic": "cena", "nazev": "Cenová konkurenceschopnost", "vaha": 20, "skore": None,
+                       "vysvetleni": f"Jen {len(ceny)} {'zakázka' if len(ceny) == 1 else 'zakázky' if len(ceny) < 5 else 'zakázek'} se známou "
+                                     f"předpokládanou i skutečnou cenou – na spolehlivé srovnání je potřeba aspoň 5."})
     # 4 sire klientske zakladny: zadavatele z vyher v RVZ i odberatele z Registru smluv
     obj_k = defaultdict(float)
     for k in klienti:
@@ -737,20 +771,38 @@ def profil(con, ico, cfg, today=None, online=True):
         slozky.append({"klic": "klienti", "nazev": "Šíře klientské základny", "vaha": 15, "skore": round(sc),
                        "vysvetleni": f"{len(obj_k)} veřejných zákazníků (soutěže + Registr smluv)"
                                      + (f"; největší tvoří {_pc(nejv)} objemu." if nejv is not None else ".")})
+    # samostatne KPI: podil na trhu v hlavnim oboru (vyhrane soutezni objemy) a zavislost na nejvetsim zakaznikovi
+    seg_hl = next((x for x in segmenty if x["segment"] != NEUVEDENO and x["podil"] is not None), None)
+    podil_trhu = ({"obor": seg_hl["segment"].split(" ", 1)[-1], "podil": seg_hl["podil"], "poradi": seg_hl["poradi"],
+                   "dodavatelu": seg_hl["dodavatelu"]} if seg_hl else None)
+    nejvetsi_zakaznik = None
+    if obj_k and sum(obj_k.values()) > 0:
+        tot_z = sum(obj_k.values())
+        kl_ico, kl_obj = max(obj_k.items(), key=lambda kv: kv[1])
+        jm = next((k["nazev"] for k in klienti if k["ico"] == kl_ico), None)
+        if not jm:
+            r = con.execute("SELECT nazev FROM subjekty WHERE ico=?", (kl_ico,)).fetchone()
+            jm = (r[0] if r else None) or kl_ico
+        nejvetsi_zakaznik = {"nazev": jm, "podil": kl_obj / tot_z, "zakazniku": len(obj_k)}
     # 5 dynamika: vyhry 6 v 6 mesicu, a kdyz Registr smluv pokryva aspon 12 mesicu, i pocet smluv
     rs_mes = {m["mesic"]: m["pocet"] for m in (rs_souhrn or {}).get("mesice", [])}
-    m6, m12 = (today - timedelta(days=183)).isoformat()[:7], (today - timedelta(days=366)).isoformat()[:7]
-    rs_nove = sum(n for m, n in rs_mes.items() if m >= m6)
+    m6, m12, m0 = t6[:7], t12[:7], ref.isoformat()[:7]
+    rs_nove = sum(n for m, n in rs_mes.items() if m6 <= m < m0)  # rozbehnuty mesic se nepocita
     rs_stare = sum(n for m, n in rs_mes.items() if m12 <= m < m6)
     rs_pokryti = len({m for m in rs_mes if m >= m12}) >= 10
     if nove or stare or (rs_pokryti and (rs_nove or rs_stare)):
         a, b_ = nove + (rs_nove if rs_pokryti else 0), stare + (rs_stare if rs_pokryti else 0)
-        ratio = (a + 1) / (b_ + 1)
+        ta = trh_dyn["vyhry_nove"] + (trh_dyn["rs_nove"] if rs_pokryti else 0)
+        tb = trh_dyn["vyhry_stare"] + (trh_dyn["rs_stare"] if rs_pokryti else 0)
+        trh_ratio = (ta / tb) if ta and tb else 1.0
+        ratio = ((a + 1) / (b_ + 1)) / trh_ratio  # firma vuci trhu: 1 = roste stejne jako trh
         sc = _clamp(50 + math.log2(ratio) * 25)
         slozky.append({"klic": "trend", "nazev": "Dynamika", "vaha": 15, "skore": round(sc),
-                       "vysvetleni": f"{nove} výher za posledních 6 měsíců vs. {stare} v předchozích 6"
-                                     + (f"; smlouvy v Registru {rs_nove} vs. {rs_stare}." if rs_pokryti else
-                                        " (Registr smluv zatím nepokrývá celý rok, do dynamiky se nepočítá).")})
+                       "vysvetleni": f"{nove} výher za posledních 6 měsíců dat vs. {stare} v předchozích 6"
+                                     + (f"; smlouvy v Registru {rs_nove} vs. {rs_stare}" if rs_pokryti else
+                                        " (Registr smluv zatím nepokrývá celý rok, do dynamiky se nepočítá)")
+                                     + f". Porovnáno s celým trhem, kterému se ve stejných obdobích změnil počet o "
+                                       f"{(trh_ratio - 1) * 100:+.0f} % (u nejnovějších soutěží často ještě není znám vítěz)."})
     platne = [s for s in slozky if s["skore"] is not None]
     celk = round(sum(s["skore"] * s["vaha"] for s in platne) / sum(s["vaha"] for s in platne)) if platne else None
     hodnoceni = None if celk is None else ("vysoká" if celk >= 65 else "střední" if celk >= 40 else "nízká")
@@ -797,7 +849,8 @@ def profil(con, ico, cfg, today=None, online=True):
                 "prumer_nabidek": statistics.mean(nab) if nab else None, "jedna_nabidka": jedna, "s_poctem_nabidek": len(nab),
                 "smluv_rs": rs[0] or 0, "objem_rs": rs[1] or 0,
                 "smluv_rs_souhrn": (rs_souhrn or {}).get("pocet", 0), "objem_rs_souhrn": (rs_souhrn or {}).get("objem", 0),
-                "overeno_rs": sum(1 for w in wins if w["overeno_rs"])},
+                "overeno_rs": sum(1 for w in wins if w["overeno_rs"]),
+                "podil_trhu": podil_trhu, "nejvetsi_zakaznik": nejvetsi_zakaznik},
         "skore": {"celkem": celk, "hodnoceni": hodnoceni, "slozky": slozky, "malo_dat": malo_dat},
         "mesice": mesice, "segmenty": segmenty, "klienti": klienti[:12], "ceny": ceny,
         "souboje": souboje, "rivalove": rivalove, "regiony": [{"kraj": k, "pocet": n} for k, n in regiony],

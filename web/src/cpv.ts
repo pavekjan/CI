@@ -15,7 +15,18 @@ export const CPV_DIV: Record<string, string> = {
   "90": "Odpady, úklid, životní prostředí", "92": "Kultura, sport, rekreace", "98": "Ostatní služby",
 };
 
-export const oborKodu = (c: string) => CPV_DIV[c.slice(0, 2)] ?? "jiný obor";
+/** Podrobnejsi skupiny (prvni 3 cislice) tam, kde je oddil moc siroky - aby instalater nevidel jen "Stavební práce". */
+const CPV_SKUPINA: Record<string, string> = {
+  "451": "Příprava staveniště a zemní práce", "452": "Stavby budov a inženýrské stavby",
+  "453": "Stavební instalace (elektro, voda, topení, klimatizace)", "454": "Dokončovací práce (okna, podlahy, malování)",
+  "425": "Chladicí, větrací a klimatizační zařízení", "507": "Opravy a údržba technických zařízení budov",
+  "909": "Úklid a čištění", "906": "Úklid veřejných prostranství", "905": "Odpady", "713": "Inženýrské služby a technický dozor",
+  "712": "Architektonické služby", "302": "Počítače a příslušenství", "301": "Kancelářská technika",
+  "322": "Telekomunikační zařízení", "323": "Audiovizuální technika", "723": "Zpracování dat", "722": "Vývoj software",
+  "797": "Ostraha a bezpečnost", "773": "Údržba zeleně",
+};
+
+export const oborKodu = (c: string) => CPV_SKUPINA[c.slice(0, 3)] ?? CPV_DIV[c.slice(0, 2)] ?? "jiný obor";
 
 export const CPV_VYSVETLENI = "CPV = evropský číselník předmětů veřejných zakázek. Každá zakázka má osmimístný kód, první dvě číslice určují obor (např. 15… = potraviny, 30… = počítače, 45… = stavby).";
 
