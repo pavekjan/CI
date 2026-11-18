@@ -220,6 +220,9 @@ v noci restartoval, třeba kvůli aktualizacím Windows) ukáže dvojklik na **`
 Velká databáze se do větve `data` nahrává rozdělená na části po 95 MB (`tenderscope.db.gz`, `.2`, `.3` …),
 protože GitHub nebere soubory nad 100 MB. Online verze i GitHub Actions si části samy spojí. Díky tomu se
 už nic nemaže kvůli velikosti (dřív se při překročení 95 MB zkracoval Registr smluv i zakázky).
+Přehledy přes celý trh (pořadí v segmentu, mediány, rivalové, stránka Trh) se po každé aktualizaci
+předpočítají do databáze, takže je i bezplatný server s malým výkonem jen načte (profil firmy za zlomek
+sekundy místo desítek sekund). Pro už hotovou databázi to udělá **`nahrat_znovu.bat`** (pár minut, nic nestahuje).
 
 **1. Registr smluv – automaticky každé ráno na GitHubu (Actions → Aktualizace dat).** Nic nemusíte mít
 zapnuté. Historie za 3 roky se doplňuje po částech (asi 8 měsíců za jeden běh), takže je kompletní zhruba

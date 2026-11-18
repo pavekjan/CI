@@ -63,9 +63,13 @@ class Model:
         return y, 1 / z
 
 
-def nauc(con):
+def nauc(con, limit=None):
+    """limit: jen poslednich N zakazek s CPV (online verze na slabem serveru, staci k odhadu oboru)."""
     m = Model()
-    for r in con.execute("SELECT nazev, druh, zadavatel_ico, cpv_hlavni FROM zakazky WHERE LENGTH(cpv_hlavni) >= 8"):
+    sql = "SELECT nazev, druh, zadavatel_ico, cpv_hlavni FROM zakazky WHERE LENGTH(cpv_hlavni) >= 8"
+    if limit:
+        sql += " ORDER BY rowid DESC LIMIT " + str(int(limit))
+    for r in con.execute(sql):
         m.uc(r[0], r[1], r[2], r[3][:2])
     return m
 

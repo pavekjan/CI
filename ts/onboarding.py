@@ -238,7 +238,7 @@ def _model_segmentu(con):
     from . import segmenty
     n = con.execute("SELECT COUNT(*) FROM zakazky WHERE LENGTH(cpv_hlavni) >= 8").fetchone()[0]
     if _MODEL.get("n") != n:
-        _MODEL.update(n=n, m=segmenty.nauc(con))
+        _MODEL.update(n=n, m=segmenty.nauc(con, limit=80000))
     return _MODEL["m"]
 
 

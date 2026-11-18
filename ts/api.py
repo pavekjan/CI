@@ -2,6 +2,8 @@
 
 Vsechno se pocita z lokalni SQLite databaze, kterou plni agenti (Scout/Extractor/Verifier).
 ARES a zpravy se pro otevrenou firmu dotahuji zivě (s cache)."""
+import bisect
+import json
 import math
 import re
 import statistics
@@ -173,7 +175,113 @@ def rebuild_index(con):
                      for ico, r in agg.items()])
     con.commit()
     log("Indexer", f"index dodavatelu: {len(agg)} firem")
+    predpocitat(con)
+    log("Indexer", "přehledy trhu předpočítány (rychlé načítání v online verzi)")
     return len(agg)
+
+
+# ---------------------------------------------------------------- predpocitane prehledy trhu
+# Prehledy pres cely trh (vsechny vyhry, vsechny firmy) jsou na velke databazi drahe. Pocitaji se jednou
+# po aktualizaci dat (rebuild_index) a ukladaji do tabulky cache, takze je online verze (slaby server)
+# jen nacte. Kdyz v cache nejsou (starsi databaze), spocitaji se pri prvnim pouziti.
+_PAMET = {}
+
+
+def _cache_get(con, klic):
+    try:
+        r = con.execute("SELECT data FROM cache WHERE klic=?", (klic,)).fetchone()
+    except Exception:  # starsi databaze bez tabulky cache
+        return None
+    return json.loads(r[0]) if r else None
+
+
+def _cache_set(con, klic, data):
+    try:
+        con.execute("INSERT OR REPLACE INTO cache VALUES (?, ?)", (klic, json.dumps(data, ensure_ascii=False)))
+        con.commit()
+    except Exception as e:  # jen zrychleni, bez nej vse funguje
+        log(A, f"cache {klic}: {str(e)[:80]}")
+
+
+def _cached(con, klic, fn):
+    if klic in _PAMET:
+        return _PAMET[klic]
+    d = _cache_get(con, klic)
+    if d is None:
+        d = fn()
+        _cache_set(con, klic, d)
+    _PAMET[klic] = d
+    return d
+
+
+def smaz_cache(con):
+    _PAMET.clear()
+    try:
+        con.execute("DELETE FROM cache")
+        con.commit()
+    except Exception:  # nosec B110 - starsi databaze bez tabulky cache
+        pass
+
+
+def _kvantily(xs, n):
+    """Zhusteny popis rozdeleni: n bodu (0., 1/(n-1)., ... 100. percentil) ze serazenych hodnot."""
+    xs = sorted(x for x in xs if x is not None)
+    if not xs:
+        return []
+    if len(xs) <= n:
+        return xs
+    return [xs[round(i * (len(xs) - 1) / (n - 1))] for i in range(n)]
+
+
+def _vazeny_median(rozdeleni):
+    """Median sjednoceni nekolika rozdeleni [(kvantily, pocet hodnot)] - kazdy bod vazi pocet/len(kvantily)."""
+    body = sorted((q, n / len(qs)) for qs, n in rozdeleni if qs and n for q in qs)
+    if not body:
+        return None
+    pul, acc = sum(w for _, w in body) / 2, 0.0
+    for q, w in body:
+        acc += w
+        if acc >= pul:
+            return q
+    return body[-1][0]
+
+
+def _spocti_trh_segmenty(con):
+    seg = _segment_stats(con, None)
+    out = {}
+    for g, s in seg.items():
+        top = sorted(s["dod"].items(), key=lambda kv: (-kv[1], -s["dod_n"][kv[0]]))[:40]
+        out[g] = {"objem": s["objem"], "vyhry": s["vyhry"], "pomery_n": len(s["pomery"]),
+                  "pomery_q": _kvantily(s["pomery"], 101), "objemy": sorted(round(v, 2) for v in s["dod"].values()),
+                  "top": [[k, v, s["dod_n"][k]] for k, v in top]}
+    rates = [r[0] / r[1] for r in con.execute("SELECT vyhry_zname, ucasti_zname FROM dodavatele WHERE ucasti_zname >= 3")]
+    rs_mapa = {r[0]: r[1] or 0 for r in con.execute("SELECT ico, SUM(hodnota) FROM smlouvy_souhrn GROUP BY ico")}
+    rvz_mapa = {r[0]: r[1] or 0 for r in con.execute("SELECT ico, objem FROM dodavatele WHERE objem > 0")}
+    vsechny = [rvz_mapa.get(k, 0) + rs_mapa.get(k, 0) for k in set(rs_mapa) | set(rvz_mapa)]
+    return {"seg": out, "trh_wr": _median(rates) or 0.3, "verejne_q": _kvantily(vsechny, 1001)}
+
+
+def trh_segmenty(con):
+    return _cached(con, "trh_segmenty", lambda: _spocti_trh_segmenty(con))
+
+
+def _nazvy(con, icos):
+    """Nazvy jen pro potrebne firmy (ne cela tabulka dodavatelu)."""
+    icos = [i for i in set(icos) if i]
+    out = {}
+    for i in range(0, len(icos), 500):
+        kus = icos[i:i + 500]
+        # bezpecnost: v dotazu jsou jen otazniky, hodnoty jdou jako parametry
+        out.update(dict(con.execute(f"SELECT ico, nazev FROM dodavatele WHERE ico IN ({','.join('?' * len(kus))})", kus)))  # nosec B608
+    return out
+
+
+def predpocitat(con):
+    """Po aktualizaci dat: smazat a znovu spocitat prehledy trhu (volano z rebuild_index)."""
+    smaz_cache(con)
+    trh_segmenty(con)
+    _trh_vse(con)
+    stav(con)
 
 
 # ---------------------------------------------------------------- stav dat
@@ -248,21 +356,32 @@ def hlidac_smlouvy(cfg, ico, online=True):
     return out
 
 
-def stav(con, demo=False):
-    one = lambda q: con.execute(q).fetchone()[0]
+def _spocti_stav(con):
+    one = lambda q: con.execute(q).fetchone()[0]  # noqa: E731
     rng = rozsah_dat(con)
-    last = con.execute("SELECT konec FROM behy WHERE stav='ok' ORDER BY id DESC LIMIT 1").fetchone()
     return {
-        "demo": demo,
         "zakazek": one("SELECT COUNT(*) FROM zakazky"),
         "vitezu": one("SELECT COUNT(*) FROM vitezove"),
         "dodavatelu": one("SELECT COUNT(*) FROM dodavatele"),
         "smluv": max(one("SELECT COUNT(*) FROM smlouvy"), one("SELECT COALESCE(SUM(pocet), 0) FROM smlouvy_souhrn")),
         "obdobi": obdobi(con),
-        "firem_ares": one("SELECT COUNT(*) FROM firmy"),
         "od": rng[0], "do": rng[1],
-        "posledni_aktualizace": last[0] if last else None,
     }
+
+
+def stav(con, demo=False):
+    last = con.execute("SELECT konec FROM behy WHERE stav='ok' ORDER BY id DESC LIMIT 1").fetchone()
+    # prazdna databaze (behem prvniho stahovani) se do cache neuklada, aby se cisla po nacteni dat obnovila
+    zaklad = _cached(con, "stav", lambda: _spocti_stav(con)) if not demo else _spocti_stav(con)
+    if not zaklad["zakazek"]:
+        _PAMET.pop("stav", None)
+        try:
+            con.execute("DELETE FROM cache WHERE klic='stav'")
+        except Exception:  # nosec B110
+            pass
+    return {"demo": demo, **zaklad,
+            "firem_ares": con.execute("SELECT COUNT(*) FROM firmy").fetchone()[0],
+            "posledni_aktualizace": last[0] if last else None}
 
 
 # ---------------------------------------------------------------- vyhledavani
@@ -413,7 +532,9 @@ def profil(con, ico, cfg, today=None, online=True):
     mesice = [{"mesic": m, **v} for m, v in sorted(by_m.items()) if od_m <= m <= today.isoformat()[:7]]
 
     # ---- segmenty ----
-    seg_all = _segment_stats(con, today)
+    ts_ = trh_segmenty(con)
+    prazdny = {"objem": 0, "vyhry": 0, "pomery_n": 0, "pomery_q": [], "objemy": [], "top": []}
+    seg_all = defaultdict(lambda: prazdny, ts_["seg"])
     seg_f = defaultdict(lambda: {"vyhry": 0, "objem": 0.0, "pomery": []})
     for w in wins:
         g = cpv_group(w["cpv_hlavni"])
@@ -424,12 +545,14 @@ def profil(con, ico, cfg, today=None, online=True):
             seg_f[g]["pomery"].append(pm)
     segmenty = []
     for g, s in sorted(seg_f.items(), key=lambda kv: -kv[1]["objem"]):
-        tot = seg_all[g]["objem"] or 0
-        ranked = sorted(seg_all[g]["dod"].items(), key=lambda kv: (-kv[1], -seg_all[g]["dod_n"][kv[0]]))
-        poradi = next((i + 1 for i, (k, _) in enumerate(ranked) if k == ico), None) if g != NEUVEDENO else None
+        sa = seg_all[g]
+        tot = sa["objem"] or 0
+        objemy = sa["objemy"]  # objemy vsech dodavatelu v segmentu, vzestupne
+        poradi = (1 + len(objemy) - bisect.bisect_right(objemy, round(s["objem"], 2))) if g != NEUVEDENO and objemy else None
         segmenty.append({"segment": g, "vyhry": s["vyhry"], "objem": s["objem"],
-                         "podil": (s["objem"] / tot) if tot and g != NEUVEDENO else None, "poradi": poradi, "dodavatelu": len(ranked),
-                         "median_pomer": _median(s["pomery"]), "trh_median_pomer": _median(seg_all[g]["pomery"]),
+                         "podil": (s["objem"] / tot) if tot and g != NEUVEDENO else None, "poradi": poradi,
+                         "dodavatelu": len(objemy),
+                         "median_pomer": _median(s["pomery"]), "trh_median_pomer": _vazeny_median([(sa["pomery_q"], sa["pomery_n"])]),
                          "trh_objem": tot})
     # "neuvedeno" (zakazky bez CPV) neni segment - nepocitat do rivalu, poradi ani prilezitosti
     hlavni_seg = [s["segment"] for s in segmenty if s["segment"] != NEUVEDENO][:3]
@@ -451,8 +574,7 @@ def profil(con, ico, cfg, today=None, online=True):
             for w in wins if _pomer(w["cena_bez_dph"], w["predpokladana_hodnota"], w["nazev"]) is not None]
     med_pomer = _median([c["pomer"] for c in ceny])
     # vazeny trzni median ve stejnych segmentech
-    trh_pomery = [p for g in seg_f if g != NEUVEDENO for p in seg_all[g]["pomery"]]
-    trh_med_pomer = _median(trh_pomery)
+    trh_med_pomer = _vazeny_median([(seg_all[g]["pomery_q"], seg_all[g]["pomery_n"]) for g in seg_f if g != NEUVEDENO])
 
     # ---- konkurence: prime souboje (spolecne zakazky) ----
     h2h = defaultdict(lambda: {"nazev": None, "stretu": 0, "my_vyhra": 0, "oni_vyhra": 0})
@@ -476,17 +598,17 @@ def profil(con, ico, cfg, today=None, online=True):
                     h2h[o]["my_vyhra"] += 1
                 if o in winners[zid]:
                     h2h[o]["oni_vyhra"] += 1
-    nazvy = {r["ico"]: r["nazev"] for r in con.execute("SELECT ico, nazev FROM dodavatele")}
-    souboje = sorted(({"ico": k, "nazev": nazvy.get(k) or v["nazev"] or k, **{x: v[x] for x in ("stretu", "my_vyhra", "oni_vyhra")}}
-                      for k, v in h2h.items()), key=lambda s: (-s["stretu"], -s["oni_vyhra"]))[:15]
-    # rivalove v segmentech (i bez dat o ucastnicich)
     riv = defaultdict(float)
     riv_n = Counter()
     for g in hlavni_seg:
-        for k, v in seg_all[g]["dod"].items():
+        for k, v, n in seg_all[g]["top"]:
             if k != ico:
                 riv[k] += v
-                riv_n[k] += seg_all[g]["dod_n"][k]
+                riv_n[k] += n
+    nazvy = _nazvy(con, list(h2h) + list(riv))
+    souboje = sorted(({"ico": k, "nazev": nazvy.get(k) or v["nazev"] or k, **{x: v[x] for x in ("stretu", "my_vyhra", "oni_vyhra")}}
+                      for k, v in h2h.items()), key=lambda s: (-s["stretu"], -s["oni_vyhra"]))[:15]
+    # rivalove v segmentech (i bez dat o ucastnicich): nejvetsi dodavatele hlavnich segmentu
     rivalove = [{"ico": k, "nazev": nazvy.get(k) or k, "objem": v, "vyhry": riv_n[k]}
                 for k, v in sorted(riv.items(), key=lambda kv: (-kv[1], -riv_n[kv[0]]))
                 if k and re.fullmatch(r"\d{8}", str(k))][:10]
@@ -512,8 +634,7 @@ def profil(con, ico, cfg, today=None, online=True):
     K_SHRINK = 5
     if win_rate is not None and len(zname) >= 1:
         # trzni srovnani jen z firem, u kterych zdroj uvadi ucastniky (jinak by win rate byl umele 100 %)
-        rates = [r[0] / r[1] for r in con.execute("SELECT vyhry_zname, ucasti_zname FROM dodavatele WHERE ucasti_zname >= 3")]
-        trh_wr = _median(rates) or 0.3
+        trh_wr = ts_["trh_wr"]
         n_z, v_z = len(zname), len(win_ids & zname)
         wr_adj = (v_z + K_SHRINK * trh_wr) / (n_z + K_SHRINK)
         sc = _clamp(50 + (wr_adj - trh_wr) * 150)
@@ -529,10 +650,8 @@ def profil(con, ico, cfg, today=None, online=True):
     rs_objem = (rs_souhrn or {}).get("objem", 0) or 0
     verejne = objem + rs_objem
     if verejne > 0:
-        rs_mapa = {r[0]: r[1] or 0 for r in con.execute("SELECT ico, SUM(hodnota) FROM smlouvy_souhrn GROUP BY ico")}
-        rvz_mapa = {r[0]: r[1] or 0 for r in con.execute("SELECT ico, objem FROM dodavatele WHERE objem > 0")}
-        vsechny = [rvz_mapa.get(k, 0) + rs_mapa.get(k, 0) for k in set(rs_mapa) | set(rvz_mapa)]
-        pr = _percentile_rank(vsechny, verejne) or 0
+        q = ts_["verejne_q"]  # rozdeleni verejnych trzeb vsech firem (kvantily)
+        pr = (100.0 * bisect.bisect_right(q, verejne) / len(q)) if q else 0
         seg_cpv = [s for s in segmenty if s["segment"] != NEUVEDENO]
         top = seg_cpv[0] if seg_cpv else None
         # poradi v hlavnim segmentu: 1. ze 100 -> 100 bodu, prostredni -> 50
@@ -636,40 +755,74 @@ def profil(con, ico, cfg, today=None, online=True):
 
 
 # ---------------------------------------------------------------- trh
-def trh(con, segment=None):
-    zak = [dict(z) for z in con.execute("SELECT id, cpv_hlavni, datum_zahajeni, predpokladana_hodnota, kraj FROM zakazky")]
-    if segment:
-        zak = [z for z in zak if cpv_group(z["cpv_hlavni"]) == segment]
-    ids = {z["id"] for z in zak}
-    by_m = Counter(_month(z["datum_zahajeni"]) for z in zak if z["datum_zahajeni"])
+def _trh_vse(con):
+    """Prehled trhu celkem i pro kazdy segment najednou (jeden pruchod daty), ulozeny v cache."""
+    if _cache_get(con, "trh:") is not None:
+        return None
+    dnes = date.today()
+    od_m, do_m = (dnes - timedelta(days=730)).isoformat()[:7], dnes.isoformat()[:7]
+    agg = defaultdict(lambda: {"zakazek": 0, "hodnota": 0.0, "mesice": Counter(), "kraje": Counter(), "odhad": 0,
+                               "dod": defaultdict(lambda: {"vyhry": 0, "objem": 0.0, "nazev": None})})
+    seg_z = {}
     segs, odhad = Counter(), Counter()
-    for (c,) in con.execute("SELECT cpv_hlavni FROM zakazky"):
-        segs[cpv_group(c)] += 1
-        if c and len(c) == 2:  # segment odhadnuty z nazvu zakazky (ts/segmenty.py), ne uvedene CPV
-            odhad[cpv_group(c)] += 1
-    dod = defaultdict(lambda: {"vyhry": 0, "objem": 0.0, "nazev": None})
-    for v in con.execute("SELECT zakazka_id, dodavatel_ico, dodavatel_nazev, cena_bez_dph FROM vitezove WHERE dodavatel_ico IS NOT NULL"):
-        if v[0] not in ids:
+    for zid, c, d, h, kraj in con.execute("SELECT id, cpv_hlavni, datum_zahajeni, predpokladana_hodnota, kraj FROM zakazky"):
+        g = cpv_group(c)
+        seg_z[zid] = g
+        segs[g] += 1
+        je_odhad = bool(c and len(c) == 2)  # segment odhadnuty z nazvu zakazky (ts/segmenty.py), ne uvedene CPV
+        if je_odhad:
+            odhad[g] += 1
+        for k in ("", g):
+            a_ = agg[k]
+            a_["zakazek"] += 1
+            a_["hodnota"] += h or 0
+            if d and od_m <= d[:7] <= do_m:
+                a_["mesice"][d[:7]] += 1
+            a_["kraje"][kraj or "neuvedeno"] += 1
+            a_["odhad"] += je_odhad
+    for zid, ico, nazev, cena in con.execute(
+            "SELECT zakazka_id, dodavatel_ico, dodavatel_nazev, cena_bez_dph FROM vitezove WHERE dodavatel_ico IS NOT NULL"):
+        g = seg_z.get(zid)
+        if g is None:
             continue
-        d = dod[v[1]]
-        d["vyhry"] += 1
-        d["objem"] += v[3] or 0
-        d["nazev"] = d["nazev"] or v[2]
-    nazvy = {r[0]: r[1] for r in con.execute("SELECT ico, nazev FROM dodavatele")}
-    tot = sum(d["objem"] for d in dod.values()) or 1
-    top = sorted(({"ico": k, "nazev": nazvy.get(k) or v["nazev"], "vyhry": v["vyhry"], "objem": v["objem"], "podil": v["objem"] / tot}
-                  for k, v in dod.items()), key=lambda d: (-d["objem"], -d["vyhry"]))[:15]
-    return {
-        "segment": segment,
-        "zakazek": len(zak),
-        "hodnota": sum(z["predpokladana_hodnota"] or 0 for z in zak),
-        "mesice": [{"mesic": m, "pocet": n} for m, n in sorted(by_m.items())
-                   if (date.today() - timedelta(days=730)).isoformat()[:7] <= m <= date.today().isoformat()[:7]],
-        "kraje": [{"kraj": k, "pocet": n} for k, n in Counter(z["kraj"] or "neuvedeno" for z in zak).most_common(14)],
-        "segmenty": [{"segment": s, "pocet": n, "odhad": odhad[s]} for s, n in segs.most_common(40)],
-        "odhadnuto": sum(odhad.values()) if not segment else sum(1 for z in zak if z["cpv_hlavni"] and len(z["cpv_hlavni"]) == 2),
-        "top": top,
-    }
+        for k in ("", g):
+            dd = agg[k]["dod"][ico]
+            dd["vyhry"] += 1
+            dd["objem"] += cena or 0
+            dd["nazev"] = dd["nazev"] or nazev
+    del seg_z
+    segmenty_ = [{"segment": s_, "pocet": n, "odhad": odhad[s_]} for s_, n in segs.most_common(40)]
+    tops = {k: sorted(a_["dod"].items(), key=lambda kv: (-kv[1]["objem"], -kv[1]["vyhry"]))[:15] for k, a_ in agg.items()}
+    nazvy = _nazvy(con, [i for t in tops.values() for i, _ in t])
+    vysl = {}
+    for k, a_ in agg.items():
+        tot = sum(d["objem"] for d in a_["dod"].values()) or 1
+        vysl["trh:" + k] = {
+            "segment": k or None, "zakazek": a_["zakazek"], "hodnota": a_["hodnota"],
+            "mesice": [{"mesic": m, "pocet": n} for m, n in sorted(a_["mesice"].items())],
+            "kraje": [{"kraj": kr, "pocet": n} for kr, n in a_["kraje"].most_common(14)],
+            "segmenty": segmenty_, "odhadnuto": a_["odhad"],
+            "top": [{"ico": i, "nazev": nazvy.get(i) or v["nazev"], "vyhry": v["vyhry"], "objem": v["objem"],
+                     "podil": v["objem"] / tot} for i, v in tops[k]]}
+    for k, v in vysl.items():
+        _cache_set(con, k, v)
+    return vysl
+
+
+def trh(con, segment=None):
+    klic = "trh:" + (segment or "")
+    if klic in _PAMET:
+        return _PAMET[klic]
+    d = _cache_get(con, klic)
+    if d is None:
+        vse = _trh_vse(con) or {}
+        d = vse.get(klic) or _cache_get(con, klic)
+    if d is None:  # segment bez zakazek
+        d = {"segment": segment, "zakazek": 0, "hodnota": 0, "mesice": [], "kraje": [], "segmenty": [],
+             "odhadnuto": 0, "top": []}
+    if len(_PAMET) < 200:
+        _PAMET[klic] = d
+    return d
 
 
 # ---------------------------------------------------------------- knowledge graph
