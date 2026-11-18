@@ -4,7 +4,7 @@ Asi 70 % zaznamu v open datech RVZ nema CPV vyplnene. Postup ve vrstvach:
 1. Uvedene CPV se nikdy nemeni.
 2. Odhad podle slov v nazvu: model se kazdou aktualizaci nauci z zakazek, ktere CPV maji
    (slova nazvu + druh zakazky + zadavatel, naivni Bayes). Prirazuje se jen pri jistote >= JISTOTA;
-   pri overeni na zakazkach s CPV ma tak presnost kolem 93 %.
+   pri overeni na 8 000 zakazkach s CPV ma presnost kolem 89 % a rozradi asi 70 % z nich.
 3. Volitelne AI (aktualizovat_db.py --ai): jen pro zbytek, po davkach, s limitem a cache. Do AI jde jen
    verejny nazev a druh zakazky, nic jineho.
 
@@ -18,7 +18,7 @@ from collections import Counter, defaultdict
 from .util import log, norm
 
 A = "Segmenty"
-JISTOTA = 0.9
+JISTOTA = 0.95
 MIN_TRIDA = 20  # oddily s mene nez 20 priklady model neodhaduje (malo dat)
 STOP = set("pro dodavka dodavky dodani zajisteni rok zakazka zakazky verejna etapa ramcova dohoda cast casti".split())
 
@@ -47,8 +47,12 @@ class Model:
             self.tf[oddil][t] += 1
             self.df[t] += 1
 
-    def odhad(self, nazev, druh, zadavatel):
-        """Vrati (oddil, jistota) nebo (None, 0)."""
+    def odhad(self, nazev, druh, zadavatel, beta=20):
+        """Vrati (oddil, jistota) nebo (None, 0).
+
+        Pravdepodobnost slova ve tride se vyhlazuje k jeho beznemu vyskytu (m-odhad, beta = sila vyhlazeni).
+        Driv se vyhlazovalo konstantou, a tak male tridy (napr. 41 Voda s 50 priklady) vyhravaly u slov, ktera
+        nikdy nevidely: nahradni dily pro vlaky koncily jako "voda"."""
         tridy = {y: n for y, n in self.tridy.items() if n >= MIN_TRIDA}
         if not tridy:
             return None, 0.0
@@ -56,7 +60,9 @@ class Model:
         pr = [t for t in _priznaky(nazev, druh, zadavatel) if self.df[t] >= 2]
         if not [t for t in pr if not t.startswith("__")]:
             return None, 0.0  # zadne zname slovo v nazvu -> neodhadovat jen podle druhu/zadavatele
-        sk = {y: math.log(n / N) + sum(math.log((self.tf[y][t] + 0.1) / (n + 0.2)) for t in pr) for y, n in tridy.items()}
+        pozadi = {t: self.df[t] / N for t in pr}
+        sk = {y: math.log(n / N) + sum(math.log((self.tf[y][t] + beta * pozadi[t]) / (n + beta)) for t in pr)
+              for y, n in tridy.items()}
         mx = max(sk.values())
         z = sum(math.exp(v - mx) for v in sk.values())
         y = max(sk, key=sk.get)

@@ -7,7 +7,7 @@ const BARVA: Record<GrafUzel["typ"], string> = {
   firma: "var(--series-1)", obor: "#8a5cf6", zadavatel: "#16a34a", konkurent: "var(--series-2)", zakazka: "#64748b", zdroj: "#0ea5e9",
 };
 const POPIS: Record<GrafUzel["typ"], string> = {
-  firma: "Firma", obor: "Obor (CPV)", zadavatel: "Zákazník (zadavatel)", konkurent: "Konkurent", zakazka: "Vyhraná zakázka", zdroj: "Zdroj dat",
+  firma: "Firma", obor: "Obor", zadavatel: "Zákazník (zadavatel)", konkurent: "Konkurent", zakazka: "Vyhraná zakázka", zdroj: "Zdroj dat",
 };
 const W = 900, H = 620;
 

@@ -49,7 +49,7 @@ Jakmile uživatel odpoví na položené otázky:
 ```json
 {
   "status": "needs_clarification",
-  "detected_summary": "Stručné shrnutí toho, co jsi zjistil z ARESu a Registru smluv (obor, dosavadní objemy zakázek, hlavní klienti).",
+  "detected_summary": "2–4 věty lidsky: co firma prodává a komu (např. „prodává státu hlavně potraviny – 97 % výher, nejčastěji nemocnicím a armádě“), jak velké zakázky dělá. Vycházej z recon.identita a recon.historie.",
   "detected_vertical": "stavebnictvi | it_sw | facility_sluzby | dodavky_zbozi | poradenstvi | jine",
   "questions": [
     {
@@ -65,11 +65,11 @@ Jakmile uživatel odpoví na položené otázky:
 
 <!-- ===== Doplněk TenderScope (původní zadání končilo u Varianty A) ===== -->
 
-Id otázek používej v tomto pořadí: `q1_scope`, `q5_strategy`, `q2_budget`, `q3_region`, `q4_qualification` (5 otázek; otázku na konkurenty `q6_competitors` sestaví systém sám z dat o účastnících soutěží, ty ji nevracej).
+Id otázek používej v tomto pořadí: `q1_scope`, `q5_strategy`, `q2_budget`, `q3_region`, `q4_qualification` (5 otázek; otázku na konkurenty `q6_competitors` a na počet dní na přípravu nabídky `q2_prep` sestaví systém sám, ty je nevracej). `q2_budget` se ptá jen na velikost zakázek, ne na dny.
 
-`q5_strategy` (Strategický cíl) se ptá na hlavní obchodní cíl na 12 měsíců: bránit stávající zákazníky, získat nové zadavatele, vstoupit do sousedního oboru, nebo větší zakázky.
+`q5_strategy` (Cíl) se ptá na hlavní cíl na příští rok: udržet stávající zákazníky, získat nové, proniknout do nového oboru, nebo větší zakázky.
 
-**Otázky stav na důkazech z `recon.ci`** (souboje s konkurenty, koncentrace zákazníků, „bílá místa“ = obory, kde nakupují stávající zákazníci firmy a firma tam nedodává, dynamika výher). V textu otázky můžeš konkrétní číslo z dat zmínit (např. „největší zákazník tvoří 62 % tržeb“), ale nikdy si čísla ani názvy firem nevymýšlej – použij jen to, co je ve vstupu. Možnosti `Rozšířit do: <obor>` u `q1_scope` ponech beze změny, systém je páruje na CPV.
+**Otázky stav na důkazech z `recon.ci`** (souboje s konkurenty, koncentrace zákazníků, „bílá místa“ = obory, kde nakupují stávající zákazníci firmy a firma tam nedodává, dynamika výher). V textu otázky můžeš konkrétní číslo z dat zmínit (např. „největší zákazník tvoří 62 % tržeb“), ale nikdy si čísla ani názvy firem nevymýšlej – použij jen to, co je ve vstupu. Možnosti `Nově i: <obor>` a `Nechceme: <věc>` u `q1_scope` ponech beze změny, systém je páruje na CPV. Piš jednoduchou češtinou, jakou mluví majitel firmy, bez odborných zkratek. Nepoužívej zkratky CPV, NACE, RVZ, ISVZ, VZMR, NUTS ani anglické výrazy (whitelist, dealbreaker, bodyshopping) – napiš, co znamenají. Otázky přizpůsob typu firmy (`recon.identita.typ`: zbozi / sluzby / stavby / it): obchodníka se zbožím se neptej na „řešení na klíč“, stavební firmy na licence apod.
 
 ## Varianta B: Výstup ve Fázi 2 (`status: "completed"`)
 

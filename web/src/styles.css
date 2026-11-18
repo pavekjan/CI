@@ -339,3 +339,34 @@ textarea.field { resize: vertical; line-height: 1.5; }
   .card { padding: 16px; }
   .otazka { padding: 14px; }
 }
+
+/* v22: prubeh dlouhych kroku */
+.prubeh { display: grid; gap: 12px; }
+.prubeh.kompakt { margin-top: 14px; padding: 14px 16px; border: 1px solid var(--border); border-radius: 14px; background: var(--surface-2); }
+.prubeh-bar { height: 4px; border-radius: 999px; background: var(--surface-2); overflow: hidden; position: relative; }
+.prubeh.kompakt .prubeh-bar { background: var(--surface-1); }
+.prubeh-bar span { position: absolute; inset: 0 auto 0 0; width: 35%; border-radius: 999px; background: linear-gradient(90deg, var(--series-1), var(--accent-2)); animation: prubeh 1.4s ease-in-out infinite; }
+@keyframes prubeh { 0% { left: -35%; } 100% { left: 100%; } }
+.prubeh-kroky { list-style: none; margin: 0; padding: 0; display: grid; gap: 7px; }
+.prubeh-kroky li { display: flex; align-items: center; gap: 10px; color: var(--text-muted); font-size: 13.5px; transition: color .2s; }
+.prubeh-kroky li.bezi { color: var(--text-primary); font-weight: 600; }
+.prubeh-kroky li.hotovo { color: var(--text-secondary); }
+.prubeh-ikona { width: 20px; height: 20px; display: grid; place-items: center; border-radius: 50%; border: 1.5px solid var(--border-strong); font-size: 11px; flex: none; }
+.prubeh-kroky li.hotovo .prubeh-ikona { background: var(--good-bg); color: var(--good); border-color: transparent; }
+.prubeh-kroky li.bezi .prubeh-ikona { border-color: transparent; }
+.spinner.mini { width: 14px; height: 14px; border-width: 2px; vertical-align: -2px; }
+.spinner.light { border-color: rgba(255,255,255,.35); border-top-color: #fff; }
+@media (prefers-reduced-motion: reduce) { .prubeh-bar span, .spinner { animation-duration: 3s; } }
+
+/* Porterovych 5 sil */
+.porter { list-style: none; margin: 6px 0 0; padding: 0; display: grid; gap: 8px; }
+.ci-full { grid-column: 1 / -1; }
+.porter li { display: grid; grid-template-columns: 140px 1fr; gap: 10px; align-items: baseline; padding: 8px 10px;
+  border: 1px solid var(--border); border-radius: 10px; background: var(--surface-2); }
+.porter li .badge { justify-self: start; white-space: normal; }
+@media (max-width: 700px) { .porter li { grid-template-columns: 1fr; gap: 4px; } }
+.porter-grid { display: grid; grid-template-columns: minmax(280px, 420px) minmax(0, 1fr); gap: 16px; align-items: start; }
+@media (max-width: 900px) { .porter-grid { grid-template-columns: minmax(0, 1fr); } }
+.pavucina { width: 100%; height: auto; }
+.pav-label { font-size: 12px; font-weight: 600; fill: var(--text-secondary); }
+.pav-osa { font-size: 9.5px; fill: var(--text-muted); }

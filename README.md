@@ -261,7 +261,7 @@ zakázky, které nemají číslo ve Věstníku (jen Identifikátor NIPEZ nebo č
 S tokenem Hlídače (`HLIDAC_TOKEN`) ukáže profil firmy pro srovnání i Hlídačův počet smluv a zakázek.
 
 **Segment „neuvedeno“:** asi 70 % záznamů RVZ nemá vyplněné CPV. Aplikace segment odhadne podle názvu
-zakázky (model se učí ze zakázek, které CPV mají; přesnost kolem 93 %) a označí ho jako *odhad*. Zbytek
+zakázky (model se učí ze zakázek, které CPV mají; přesnost kolem 89 %) a označí ho jako *odhad*. Zbytek
 může volitelně zařadit AI (`aktualizovat_online.bat` ji použije, když je na stránce Data nastavená; posílá
 se jen veřejný název a druh zakázky).
 

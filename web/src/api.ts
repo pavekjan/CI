@@ -177,6 +177,7 @@ export interface CiAnalyza {
   bila_mista: { segment: string; objem: number; pocet: number; zakazniku: number; lidr: string | null }[];
   trend: { posl12: number; pred12: number; do: string } | null;
   zjisteni: Zjisteni[];
+  porter?: { obor: string; obdobi_do: string; sily: { sila: string; hodnoceni: string; text: string; zdroj: string; jistota: string }[] } | null;
 }
 export interface Kandidat { ico: string; nazev: string | null; sidlo: string | null; zdroj: string; vyhry: number; ucasti: number; objem: number; smluv_rs: number }
 export interface NalezFirmy { dotaz: string; typ: "ico" | "web" | "nazev"; web: string | null; kandidati: Kandidat[]; poznamka: string | null }

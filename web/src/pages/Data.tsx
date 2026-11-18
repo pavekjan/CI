@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { adminHeslo, api, nastavAdminHeslo, type AiForm, type AiLimity, type Beh, type Nastaveni, type Stav } from "../api";
 import { Card, Kpi } from "../components";
-import { datum, mesic, num } from "../format";
+import { datum, mesicCislem, num, obdobiZakazek } from "../format";
 
 export default function Data({ stav, refresh }: { stav: Stav | null; refresh: () => void }) {
   const [beh, setBeh] = useState<Beh | null>(null);
@@ -98,10 +98,10 @@ export default function Data({ stav, refresh }: { stav: Stav | null; refresh: ()
       <h1>Data</h1>
       {stav && (
         <div className="grid g4">
-          <Kpi label="Zakázek" value={num(stav.zakazek)} note={stav.od ? `${datum(stav.od)} – ${datum(stav.do)}` : "zatím nic"} />
+          <Kpi label="Zakázek" value={num(stav.zakazek)} note={obdobiZakazek(stav) ?? "zatím nic"} />
           <Kpi label="Dodavatelů" value={num(stav.dodavatelu)} />
-          <Kpi label="Smluv (Registr smluv)" value={num(stav.smluv)} note={stav.obdobi?.rs_od ? `${mesic(stav.obdobi.rs_od)} – ${mesic(stav.obdobi.rs_do!)}` : undefined} />
-          <Kpi label="Profilů z ARES" value={num(stav.firem_ares)} />
+          <Kpi label="Smluv (Registr smluv)" value={num(stav.smluv)} note={stav.obdobi?.rs_od ? `zveřejněné ${mesicCislem(stav.obdobi.rs_od)}–${mesicCislem(stav.obdobi.rs_do!)}` : undefined} />
+          <Kpi label="Firem dohledaných v ARES" value={num(stav.firem_ares)} note="přibývají, když někdo otevře firmu" />
         </div>
       )}
 

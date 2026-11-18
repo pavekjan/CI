@@ -3,8 +3,9 @@ import {
   api, type AgentInfo, type CiAnalyza, type Dukaz, type Faze1, type Kriterium, type NalezFirmy, type Odpoved, type PolozkaZpravodaje, type Profil2,
   type Recon, type Srazka, type Zpravodaj,
 } from "../api";
-import { Card, go, Kpi, Loading } from "../components";
+import { Card, go, Kpi } from "../components";
 import { datum, kc, num } from "../format";
+import { CPV_VYSVETLENI, oborKodu, zdrojLidsky } from "../cpv";
 
 const KRAJE: [string, string][] = [
   ["CZ010", "Praha"], ["CZ020", "Středočeský"], ["CZ031", "Jihočeský"], ["CZ032", "Plzeňský"], ["CZ041", "Karlovarský"],
@@ -24,7 +25,39 @@ function AgentBadge({ a }: { a: AgentInfo | null }) {
   if (!a) return null;
   return a.rezim === "llm" || a.rezim === "claude"
     ? <span className="badge good" title={`${a.vstup_tokenu ?? "?"} vstupních / ${a.vystup_tokenu ?? "?"} výstupních tokenů`}>Agent: {a.poskytovatel ?? "AI"} ({a.model})</span>
-    : <span className="badge neutral" title={a.duvod ? `Bez AI, podle pravidel z dat: ${a.duvod}` : "Bez AI, podle pravidel z dat"}>Agent: pravidla</span>;
+    : <span className="badge neutral" title={a.duvod ? `Bez AI, podle pravidel z dat: ${a.duvod}` : "Bez AI, podle pravidel z dat"}>Agent: bez AI (pravidla)</span>;
+}
+
+// ------------------------------------------------------------------ prubeh dlouhych kroku
+type Busy = { kde: "start" | "profil" | "ulozit"; kroky: string[] };
+const KROKY_START = ["Hledám firmu v ARES", "Procházím přes 500 tisíc veřejných zakázek a Registr smluv",
+  "Zjišťuji, s kým firma soutěží a kdo jsou její zákazníci", "Hledám obory, kde u jejích zákazníků vyhrává konkurence", "Připravuji otázky"];
+const KROKY_PROFIL = ["Zpracovávám vaše odpovědi", "Sestavuji profil firmy", "Procházím zakázky za posledních 14 dní",
+  "Hodnotím každou zakázku: obor, velikost, lhůta, konkurence"];
+const KROKY_ULOZIT = ["Ukládám profil", "Znovu hodnotím zakázky podle upraveného profilu"];
+const KROKY_HLEDANI = ["Hledám v databázi zakázek", "Ptám se ARES", "Kontroluji web firmy"];
+
+export function Prubeh({ kroky, kompakt = false }: { kroky: string[]; kompakt?: boolean }) {
+  const [t, setT] = useState(0);
+  useEffect(() => {
+    const t0 = Date.now();
+    const id = window.setInterval(() => setT((Date.now() - t0) / 1000), 250);
+    return () => window.clearInterval(id);
+  }, [kroky]);
+  const aktivni = Math.min(kroky.length - 1, Math.floor(t / 2.6));  // posledni krok zustane aktivni do konce
+  return (
+    <div id="prubeh" className={`prubeh ${kompakt ? "kompakt" : "card"}`} role="status" aria-live="polite">
+      <div className="prubeh-bar"><span /></div>
+      <ol className="prubeh-kroky">
+        {kroky.map((k, i) => (
+          <li key={k} className={i < aktivni ? "hotovo" : i === aktivni ? "bezi" : ""}>
+            <span className="prubeh-ikona">{i < aktivni ? "✓" : i === aktivni ? <span className="spinner mini" /> : ""}</span>{k}
+          </li>
+        ))}
+      </ol>
+      <div className="small muted">{Math.floor(t)} s{t > 15 ? " · bezplatný server se po pauze probouzí, první načtení může trvat až minutu" : ""}</div>
+    </div>
+  );
 }
 
 // ------------------------------------------------------------------ hlavni stranka
@@ -36,13 +69,13 @@ export default function Onboarding({ ico }: { ico: string | null }) {
   const [profil, setProfil] = useState<Profil2 | null>(null);
   const [agent2, setAgent2] = useState<AgentInfo | null>(null);
   const [zprav, setZprav] = useState<Zpravodaj | null>(null);
-  const [busy, setBusy] = useState<string | null>(null);
+  const [busy, setBusy] = useState<Busy | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
     setRecon(null); setF1(null); setProfil(null); setZprav(null); setErr(null); setAgent1(null); setAgent2(null);
     if (!ico) return;
-    setBusy("Načítám uložený profil…");
+    setBusy({ kde: "start", kroky: ["Načítám uložený profil"] });
     api.onbStav(ico)
       .then((s) => {
         setRecon(s.recon); setF1(s.faze1); setOdp(s.odpovedi ?? {}); setProfil(s.profil); setZprav(s.zpravodaj ?? null);
@@ -52,7 +85,8 @@ export default function Onboarding({ ico }: { ico: string | null }) {
   }, [ico]);
 
   const start = async (i: string, web: string) => {
-    setErr(null); setBusy("Recon agent prochází ARES, databázi zakázek, Registr smluv a web firmy, Onboarding agent píše otázky…");
+    setErr(null); setBusy({ kde: "start", kroky: KROKY_START });
+    setTimeout(() => document.getElementById("prubeh")?.scrollIntoView({ behavior: "smooth", block: "center" }), 50);
     try {
       const r = await api.onbStart(i, web);
       setRecon(r.recon); setF1(r.faze1); setAgent1(r.agent); setOdp({}); setProfil(null); setZprav(null);
@@ -67,7 +101,8 @@ export default function Onboarding({ ico }: { ico: string | null }) {
 
   const dokoncit = async () => {
     if (!recon) return;
-    setErr(null); setBusy("Onboarding agent sestavuje profil a páruje ho se zakázkami za posledních 14 dní…");
+    setErr(null); setBusy({ kde: "profil", kroky: KROKY_PROFIL });
+    setTimeout(() => document.getElementById("prubeh")?.scrollIntoView({ behavior: "smooth", block: "center" }), 50);
     try {
       const r = await api.onbDokoncit(recon.ico, odp);
       setProfil(r.company_profile); setAgent2(r.agent); setZprav(r.zpravodaj);
@@ -80,7 +115,8 @@ export default function Onboarding({ ico }: { ico: string | null }) {
   };
 
   const ulozit = async (p: Profil2) => {
-    setBusy("Přepočítávám zpravodaj…");
+    setBusy({ kde: "ulozit", kroky: KROKY_ULOZIT });
+    setTimeout(() => document.getElementById("prubeh")?.scrollIntoView({ behavior: "smooth", block: "center" }), 50);
     try {
       const r = await api.onbUlozProfil(p.ico, p);
       setProfil(r.company_profile); setZprav(r.zpravodaj);
@@ -102,10 +138,12 @@ export default function Onboarding({ ico }: { ico: string | null }) {
       </div>
       <StartForm initial={ico ?? ""} onStart={start} disabled={!!busy} />
       {err && <div className="callout">{err}</div>}
-      {busy && <Card><Loading text={busy} /></Card>}
+      {busy?.kde === "start" && <Prubeh kroky={busy.kroky} />}
       {recon && f1 && <div id="recon"><ReconCard recon={recon} f1={f1} agent={agent1} /></div>}
-      {recon && f1 && <Dotaznik f1={f1} odp={odp} setOdp={setOdp} onSubmit={dokoncit} disabled={!!busy} hotovo={!!profil} />}
-      {profil && <ProfilCard profil={profil} agent={agent2} onSave={ulozit} disabled={!!busy} />}
+      {recon && f1 && <Dotaznik f1={f1} odp={odp} setOdp={setOdp} onSubmit={dokoncit} disabled={!!busy} bezi={busy?.kde === "profil"} hotovo={!!profil} />}
+      {busy?.kde === "profil" && <Prubeh kroky={busy.kroky} />}
+      {profil && <ProfilCard profil={profil} agent={agent2} onSave={ulozit} disabled={!!busy} bezi={busy?.kde === "ulozit"} />}
+      {busy?.kde === "ulozit" && <Prubeh kroky={busy.kroky} />}
       {zprav && profil && <ZpravodajCard z={zprav} profil={profil} />}
     </div>
   );
@@ -145,8 +183,11 @@ function StartForm({ initial, onStart, disabled }: { initial: string; onStart: (
           <input className="field big" value={q} onChange={(e) => setQ(e.target.value)} autoFocus
             placeholder="např. 27082440, Strabag nebo www.alza.cz" aria-label="IČO, název firmy nebo web" />
         </div>
-        <button className="btn primary big" disabled={disabled || hledam || !q.trim()}>{hledam ? "Hledám…" : "Najít a spustit rešerši"}</button>
+        <button className="btn primary big" disabled={disabled || hledam || !q.trim()}>
+          {hledam || disabled ? <><span className="spinner mini light" /> Pracuji…</> : "Najít a spustit rešerši"}
+        </button>
       </form>
+      {hledam && <Prubeh kroky={KROKY_HLEDANI} kompakt />}
       {chyba && <div className="callout" style={{ marginTop: 12 }}>{chyba}</div>}
       {nalez && (
         <div className="kandidati">
@@ -211,6 +252,8 @@ function ReconCard({ recon, f1, agent }: { recon: Recon; f1: Faze1; agent: Agent
 }
 
 // ------------------------------------------------------------------ CI: klicova zjisteni + konkurenti
+// vysoka sila = tezsi trh (cervena), nizka = prijemnejsi (zelena)
+const SILA: Record<string, string> = { "vysoká": "bad", "střední": "warn", "nízká": "good" };
 const JISTOTA: Record<string, string> = { "vysoká": "good", "střední": "warn", "nízká": "neutral" };
 
 function Rating({ r }: { r: string }) {
@@ -218,8 +261,55 @@ function Rating({ r }: { r: string }) {
   return <span className="rating" title={`Admiralty kód: ${r[0]} = spolehlivost zdroje (A = zcela spolehlivý, oficiální registr), ${r.slice(1)} = věrohodnost informace (1 = potvrzeno)`}>{r}</span>;
 }
 
+const UROVEN: Record<string, number> = { "nízká": 1, "střední": 2, "vysoká": 3 };
+const KRATCE: Record<string, string> = {
+  "Rivalita mezi konkurenty": "Rivalita", "Síla odběratelů (zadavatelů)": "Síla zadavatelů", "Hrozba nových konkurentů": "Noví konkurenti",
+  "Hrozba náhražek (substitutů)": "Náhražky", "Síla vašich dodavatelů": "Vaši dodavatelé",
+};
+
+/** Pavucinovy graf Porterovych 5 sil: 0 = stred, 1-3 = nizka/stredni/vysoka. Neohodnocene sily jsou "?" ve stredu. */
+function PorterPavucina({ sily }: { sily: { sila: string; hodnoceni: string; text: string }[] }) {
+  const W = 480, H = 290, cx = W / 2, cy = H / 2 + 8, R = 100;
+  const n = sily.length;
+  const bod = (i: number, v: number) => {
+    const a = -Math.PI / 2 + (2 * Math.PI * i) / n;
+    return [cx + Math.cos(a) * R * (v / 3), cy + Math.sin(a) * R * (v / 3)];
+  };
+  const hodnoty = sily.map((s) => UROVEN[s.hodnoceni] ?? 0);
+  const poly = hodnoty.map((v, i) => bod(i, v).join(",")).join(" ");
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} className="pavucina" role="img" aria-label="Pavučinový graf Porterových pěti sil">
+      {[1, 2, 3].map((k) => (
+        <polygon key={k} points={sily.map((_, i) => bod(i, k).join(",")).join(" ")} fill="none" stroke="var(--grid)" strokeWidth={1} />
+      ))}
+      {sily.map((_, i) => { const [x, y] = bod(i, 3); return <line key={i} x1={cx} y1={cy} x2={x} y2={y} stroke="var(--grid)" strokeWidth={1} />; })}
+      {[1, 2, 3].map((k) => (
+        <text key={k} x={cx + 4} y={cy - (R * k) / 3 + 10} className="pav-osa">{["nízká", "střední", "vysoká"][k - 1]}</text>
+      ))}
+      <polygon points={poly} fill="var(--series-1)" fillOpacity={0.16} stroke="var(--series-1)" strokeWidth={2} strokeLinejoin="round" />
+      {sily.map((s, i) => {
+        const v = hodnoty[i];
+        const [x, y] = bod(i, v);
+        const [lx, ly] = bod(i, 3.55);
+        return (
+          <g key={s.sila}>
+            {v > 0 && <circle cx={x} cy={y} r={5} fill="var(--series-1)" stroke="var(--surface-1)" strokeWidth={2}><title>{`${s.sila}: ${s.hodnoceni}`}</title></circle>}
+            <text x={lx} y={ly} textAnchor={Math.abs(lx - cx) < 8 ? "middle" : lx > cx ? "start" : "end"} dominantBaseline="middle" className="pav-label">
+              {KRATCE[s.sila] ?? s.sila}{v === 0 ? " ?" : ""}
+              <title>{`${s.sila}: ${v ? s.hodnoceni : "zatím neohodnoceno – vyberte v seznamu vpravo"}`}</title>
+            </text>
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+
 function CiBlok({ ci }: { ci: CiAnalyza }) {
   const sb = ci.souboje.slice(0, 6);
+  // sily, ktere z dat zmerit nejdou, ohodnoti uzivatel sam (oznacene jako "váš odhad", ne fakt)
+  const [vlastni, setVlastni] = useState<Record<string, string>>({});
+  const sily = (ci.porter?.sily ?? []).map((p) => (p.zdroj === "úvaha" && vlastni[p.sila] ? { ...p, hodnoceni: vlastni[p.sila] } : p));
   return (
     <div className="ci">
       {ci.zjisteni.length > 0 && (
@@ -229,7 +319,7 @@ function CiBlok({ ci }: { ci: CiAnalyza }) {
             {ci.zjisteni.map((z, i) => (
               <li key={i}>
                 <span>{z.text}</span>
-                <span className="zj-meta"><span className="muted">{z.zdroj}</span> <Rating r={z.rating} />
+                <span className="zj-meta"><Zdroj z={z.zdroj} /> <Rating r={z.rating} />
                   <span className={`badge ${JISTOTA[z.jistota] ?? "neutral"}`} title="Jistota závěru podle velikosti vzorku">jistota {z.jistota}</span></span>
               </li>
             ))}
@@ -238,7 +328,7 @@ function CiBlok({ ci }: { ci: CiAnalyza }) {
       )}
       {sb.length > 0 && (
         <div>
-          <div className="ci-h">Přímí soupeři <span className="muted small">(společné soutěže, vaše výhry : jejich výhry)</span></div>
+          <div className="ci-h">Přímí soupeři <span className="muted small">(modrá = vaše výhry, oranžová = jejich; vpravo počet společných soutěží)</span></div>
           <div className="souboje">
             {sb.map((x) => {
               const tot = Math.max(1, x.my_vyhra + x.oni_vyhra);
@@ -256,13 +346,40 @@ function CiBlok({ ci }: { ci: CiAnalyza }) {
           </div>
         </div>
       )}
+      {ci.porter && (
+        <div className="ci-full">
+          <div className="ci-h" title="Model Michaela Portera: pět sil, které určují, jak těžké je v oboru vydělávat.">
+            Porterových 5 sil v oboru {ci.porter.obor.toLowerCase()} <span className="muted small">(čím dál od středu, tím tvrdší trh)</span>
+          </div>
+          <div className="porter-grid">
+            <PorterPavucina sily={sily} />
+            <ul className="porter">
+              {sily.map((p) => (
+                <li key={p.sila}>
+                  <span className={`badge ${SILA[p.hodnoceni] ?? "neutral"}`}>{p.zdroj === "úvaha" && vlastni[p.sila] ? `${p.hodnoceni} (váš odhad)` : p.hodnoceni}</span>
+                  <span><b>{p.sila}.</b> {p.text}{" "}
+                    {p.zdroj === "úvaha" ? (
+                      <span className="row" style={{ gap: 4, marginTop: 4 }}>
+                        <span className="muted small">Jak to vidíte vy?</span>
+                        {["nízká", "střední", "vysoká"].map((u) => (
+                          <button key={u} type="button" className={`chip btnchip ${vlastni[p.sila] === u ? "on" : ""}`}
+                            onClick={() => setVlastni({ ...vlastni, [p.sila]: vlastni[p.sila] === u ? "" : u })}>{u}</button>
+                        ))}
+                      </span>
+                    ) : <Zdroj z={p.zdroj} />}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
 // ------------------------------------------------------------------ krok 2: otazky
-function Dotaznik({ f1, odp, setOdp, onSubmit, disabled, hotovo }: {
-  f1: Faze1; odp: Record<string, Odpoved>; setOdp: (o: Record<string, Odpoved>) => void; onSubmit: () => void; disabled: boolean; hotovo: boolean;
+function Dotaznik({ f1, odp, setOdp, onSubmit, disabled, bezi, hotovo }: {
+  f1: Faze1; odp: Record<string, Odpoved>; setOdp: (o: Record<string, Odpoved>) => void; onSubmit: () => void; disabled: boolean; bezi: boolean; hotovo: boolean;
 }) {
   const toggle = (qid: string, val: string, multi: boolean) => {
     const cur = odp[qid] ?? { vybrano: [], text: "" };
@@ -272,12 +389,13 @@ function Dotaznik({ f1, odp, setOdp, onSubmit, disabled, hotovo }: {
   };
   const odpovezeno = f1.questions.filter((q) => (odp[q.id]?.vybrano.length ?? 0) > 0 || (odp[q.id]?.text ?? "").trim()).length;
   return (
-    <Card title={`3. ${f1.questions.length} otázek podložených daty`} sub="Ke každé otázce vidíte, z čeho vychází a co odpověď změní. Klikněte na předvolby nebo dopište vlastní odpověď; nevyplněné otázky agent doplní z historie firmy.">
+    <Card title={`3. ${f1.questions.length} otázek k vaší firmě`} sub="U každé otázky vidíte, z jakých dat vychází a k čemu odpověď poslouží. Klikněte na možnost nebo napište vlastní. Co nevyplníte, doplním podle dosavadních zakázek firmy.">
       <div className="grid" style={{ gap: 18 }}>
         {f1.questions.map((q, i) => (
           <div key={q.id} className="otazka">
-            <div className="small muted">{i + 1}. {q.category}{q.allow_multiple ? " · více možností" : ""}</div>
+            <div className="small muted">{i + 1}. {q.category}</div>
             <div className="otazka-text">{q.question_text}</div>
+            <div className="small secondary" style={{ marginTop: 2 }}>{q.allow_multiple ? "Můžete vybrat víc možností." : "Vyberte jednu možnost."}</div>
             {(q.evidence?.length ?? 0) > 0 && <Dukazy ev={q.evidence as Dukaz[]} />}
             {q.proc && <div className="small secondary proc"><b>Proč se ptáme:</b> {q.proc}</div>}
             <div className="row" style={{ gap: 8, marginTop: 8 }}>
@@ -293,18 +411,25 @@ function Dotaznik({ f1, odp, setOdp, onSubmit, disabled, hotovo }: {
         ))}
       </div>
       <div className="row" style={{ marginTop: 16 }}>
-        <button className="btn primary" disabled={disabled} onClick={onSubmit}>{hotovo ? "Znovu sestavit profil" : "Sestavit profil a zpravodaj"}</button>
+        <button className="btn primary" disabled={disabled} onClick={onSubmit}>
+          {bezi ? <><span className="spinner mini light" /> Sestavuji…</> : hotovo ? "Znovu sestavit profil" : "Sestavit profil a zpravodaj"}
+        </button>
         <span className="small muted">zodpovězeno {odpovezeno} z {f1.questions.length}</span>
       </div>
     </Card>
   );
 }
 
+function Zdroj({ z }: { z: string }) {
+  const { text, title } = zdrojLidsky(z);
+  return <span className="muted small" title={title || undefined} style={title ? { textDecoration: "underline dotted", cursor: "help" } : undefined}>zdroj: {text}</span>;
+}
+
 function Dukazy({ ev }: { ev: Dukaz[] }) {
   return (
     <ul className="dukazy">
       {ev.map((e, i) => (
-        <li key={i}><span>{e.text}</span> {e.zdroj !== "–" && <span className="muted small">{e.zdroj}</span>} <Rating r={e.rating} /></li>
+        <li key={i}><span>{e.text}</span> {e.zdroj !== "–" && <Zdroj z={e.zdroj} />} <Rating r={e.rating} /></li>
       ))}
     </ul>
   );
@@ -312,9 +437,15 @@ function Dukazy({ ev }: { ev: Dukaz[] }) {
 
 // ------------------------------------------------------------------ krok 3: profil
 const seznamText = (xs: string[]) => xs.join(", ");
+
+function Obory({ kody }: { kody: string[] }) {
+  const obory = [...new Set(kody.map(oborKodu))];
+  if (!obory.length) return null;
+  return <div className="row" style={{ gap: 4, marginTop: 4 }}>{obory.map((o) => <span key={o} className="chip">{o}</span>)}</div>;
+}
 const zText = (s: string) => s.split(/[,;\n]/).map((x) => x.trim()).filter(Boolean);
 
-function ProfilCard({ profil, agent, onSave, disabled }: { profil: Profil2; agent: AgentInfo | null; onSave: (p: Profil2) => void; disabled: boolean }) {
+function ProfilCard({ profil, agent, onSave, disabled, bezi }: { profil: Profil2; agent: AgentInfo | null; onSave: (p: Profil2) => void; disabled: boolean; bezi: boolean }) {
   const [p, setP] = useState(profil);
   const [json, setJson] = useState(false);
   useEffect(() => setP(profil), [profil]);
@@ -335,17 +466,19 @@ function ProfilCard({ profil, agent, onSave, disabled }: { profil: Profil2; agen
   const cela = p.regions_nuts3.includes("CZ0");
   return (
     <div id="profil">
-      <Card title="4. Profil firmy (company_profile)" sub="Podle tohoto profilu se filtrují a hodnotí zakázky. Cokoli upravte a klikněte Uložit – zpravodaj se přepočítá."
+      <Card title="4. Profil firmy" sub="Podle tohoto profilu se filtrují a hodnotí zakázky. Cokoli upravte a klikněte Uložit – zpravodaj se přepočítá."
         right={<div className="row" style={{ gap: 6 }}><span className="badge neutral">{VERT[p.vertical] ?? p.vertical}</span><AgentBadge a={agent} /></div>}>
         <label className="lbl">Popis kompetencí (z něj se počítá textová podobnost se zakázkami)</label>
         <textarea className="field" rows={3} value={p.core_capabilities_description} onChange={(e) => set({ core_capabilities_description: e.target.value })} />
         <div className="grid g2" style={{ marginTop: 10 }}>
           <div>
-            <label className="lbl">Hlavní CPV kódy</label>
+            <label className="lbl" title={CPV_VYSVETLENI}>Hlavní obory zakázek <span className="muted" style={{ textDecoration: "underline dotted", cursor: "help" }}>(kódy CPV)</span></label>
             <input className="field mono" value={seznamText(p.cpv_codes.main)} onChange={(e) => set({ cpv_codes: { ...p.cpv_codes, main: zText(e.target.value) } })} />
+            <Obory kody={p.cpv_codes.main} />
             {p.cpv_zdroj && <div className="small muted" style={{ marginTop: 2 }}>{p.cpv_zdroj}</div>}
-            <label className="lbl">Vedlejší CPV kódy</label>
+            <label className="lbl" title={CPV_VYSVETLENI}>Další obory, které vás mohou zajímat (kódy CPV)</label>
             <input className="field mono" value={seznamText(p.cpv_codes.secondary)} onChange={(e) => set({ cpv_codes: { ...p.cpv_codes, secondary: zText(e.target.value) } })} />
+            <Obory kody={p.cpv_codes.secondary} />
             <label className="lbl">Klíčová slova</label>
             <input className="field" value={seznamText(p.keywords)} onChange={(e) => set({ keywords: zText(e.target.value) })} />
             <label className="lbl">Negativní klíčová slova (zakázka s nimi = nevhodná)</label>
@@ -360,7 +493,7 @@ function ProfilCard({ profil, agent, onSave, disabled }: { profil: Profil2; agen
                 <input type="checkbox" checked={!!p.consortium_ok} onChange={(e) => set({ consortium_ok: e.target.checked })} />
                 <span className="small">Půjdeme i do konsorcia / s poddodavatelem</span></label>
             </div>
-            <p className="small secondary" style={{ margin: "4px 0 0" }}>Obrat slouží k odhadu, zda firma splní kvalifikaci (zadavatel smí chtít nejvýš 2× hodnotu zakázky). Bez něj se počítá s veřejnými tržbami z RVZ a Registru smluv.</p>
+            <p className="small secondary" style={{ margin: "4px 0 0" }}>Obrat slouží k odhadu, zda firma splní kvalifikaci (zadavatel smí chtít nejvýš 2× hodnotu zakázky). Bez něj se počítá s tržbami od státu ze soutěží a z Registru smluv.</p>
           </div>
           <div>
             <div className="grid g3" style={{ gap: 10 }}>
@@ -374,20 +507,20 @@ function ProfilCard({ profil, agent, onSave, disabled }: { profil: Profil2; agen
             <label className="lbl">Max. vzdálenost od sídla (km){p.sidlo?.mesto ? ` – sídlo ${p.sidlo.mesto}` : p.sidlo?.kraj ? ` – sídlo ${p.sidlo.kraj}` : ""}</label>
             <input className="field" type="number" placeholder="bez limitu (vzdálené plnění)" value={p.max_distance_km ?? ""}
               onChange={(e) => set({ max_distance_km: e.target.value ? Number(e.target.value) : null })} />
-            <label className="lbl">Regiony CZ-NUTS 3</label>
+            <label className="lbl">Kraje, kde chcete zakázky</label>
             <div className="row" style={{ gap: 6, marginTop: 4 }}>
-              <button type="button" className={`chip btnchip ${cela ? "on" : ""}`} onClick={() => set({ regions_nuts3: ["CZ0"] })}>Celá ČR (CZ0)</button>
+              <button type="button" className={`chip btnchip ${cela ? "on" : ""}`} onClick={() => set({ regions_nuts3: ["CZ0"] })}>Celá ČR</button>
               {KRAJE.map(([k, n]) => (
                 <button key={k} type="button" className={`chip btnchip ${!cela && p.regions_nuts3.includes(k) ? "on" : ""}`} onClick={() => toggleKraj(k)} title={k}>{n}</button>
               ))}
             </div>
             <div className="row small" style={{ marginTop: 10, gap: 14 }}>
-              <label><input type="checkbox" checked={p.budget.vzmr_interest} onChange={(e) => set({ budget: { ...p.budget, vzmr_interest: e.target.checked } })} /> zájem o VZMR</label>
-              {p.cooperation_model && <span className="secondary">model: {p.cooperation_model}</span>}
+              <label><input type="checkbox" checked={p.budget.vzmr_interest} onChange={(e) => set({ budget: { ...p.budget, vzmr_interest: e.target.checked } })} /> i malé zakázky (zakázky malého rozsahu)</label>
+              {p.cooperation_model && <span className="secondary">způsob dodání: {p.cooperation_model === "bodyshopping" ? "pronájem vlastních lidí" : p.cooperation_model}</span>}
             </div>
-            <label className="lbl">Dealbreakery</label>
+            <label className="lbl">Co zakázku vyřadí</label>
             <ul className="small secondary" style={{ margin: "4px 0 0", paddingLeft: 18 }}>{p.dealbreakers.map((d) => <li key={d}>{d}</li>)}</ul>
-            <div className="small muted" style={{ marginTop: 6 }}>Whitelist zadavatelů (dosavadní klienti): {p.whitelist_procurer_icos.length}</div>
+            <div className="small muted" style={{ marginTop: 6 }}>Dosavadní zákazníci, jejichž zakázky dám výš: {p.whitelist_procurer_icos.length}</div>
             {p.strategy && <div className="small" style={{ marginTop: 6 }}><span className="muted">Strategický cíl:</span> <b>{STRATEGIE[p.strategy]}</b></div>}
             {(p.watchlist?.length ?? 0) > 0 && (
               <div className="row small" style={{ marginTop: 6, gap: 6 }}>
@@ -398,7 +531,9 @@ function ProfilCard({ profil, agent, onSave, disabled }: { profil: Profil2; agen
           </div>
         </div>
         <div className="row" style={{ marginTop: 14 }}>
-          <button className="btn primary" disabled={disabled} onClick={() => onSave(p)}>Uložit a přepočítat zpravodaj</button>
+          <button className="btn primary" disabled={disabled} onClick={() => onSave(p)}>
+            {bezi ? <><span className="spinner mini light" /> Přepočítávám…</> : "Uložit a přepočítat zpravodaj"}
+          </button>
           <button className="btn" onClick={() => setJson(!json)}>{json ? "Skrýt JSON" : "Zobrazit JSON"}</button>
           <button className="btn" onClick={stahnout}>Stáhnout JSON</button>
           <a className="btn" href={`#/firma/${p.ico}`}>Konkurenceschopnost firmy →</a>
@@ -466,7 +601,7 @@ function ZpravodajCard({ z, profil }: { z: Zpravodaj; profil: Profil2 }) {
           <button key={k} className={`chip btnchip ${filtr === k ? "on" : ""}`} onClick={() => setFiltr(k)}>{l}</button>
         ))}
       </div>
-      {shown.length === 0 && <div className="empty">Nic tu není. Zkuste upravit CPV kódy nebo regiony v profilu.</div>}
+      {shown.length === 0 && <div className="empty">Nic tu není. Zkuste v profilu přidat obory nebo kraje.</div>}
       <div className="zprav">
         {shown.map(({ p, v }) => (
           <div key={p.id} className="zp">

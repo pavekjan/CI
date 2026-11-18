@@ -97,7 +97,10 @@ def iter_smlouvy(xml_path):
             for c in sm:
                 if _local(c.tag) == "smluvniStrana":
                     strany.append({"ico": clean_ico(_text(c, "ico")), "nazev": _text(c, "nazev")})
+            cm = _child(sm, "ciziMena")
+            cizi = (to_float(_text(cm, "hodnota")), (_text(cm, "mena") or "").upper().strip()) if cm is not None else (None, "")
             yield {
+                "cizi_mena": cizi,
                 "id": sid or vid,
                 "predmet": _text(sm, "predmet"),
                 "datum_uzavreni": _text(sm, "datumUzavreni"),
@@ -110,6 +113,23 @@ def iter_smlouvy(xml_path):
             }
         finally:
             el.clear()
+
+
+# Smlouvy v cizi mene nemaji v registru castku v Kc. Prepocet orientacnim kurzem (prumer 2024-2026),
+# aby velke zahranicni smlouvy (napr. v EUR) nebyly v souhrnech nulove. Jde o odhad, ne presny kurz CNB.
+KURZ_ORIENTACNI = {"EUR": 25.0, "USD": 23.0, "GBP": 29.5, "CHF": 26.0, "PLN": 5.8, "SEK": 2.2, "NOK": 2.1, "DKK": 3.35, "HUF": 0.064, "JPY": 0.155}
+
+
+def hodnota_kc(s):
+    """Hodnota bez DPH v Kc: hodnotaBezDph, jinak hodnotaVcetneDph / 1.21, jinak cizi mena x orientacni kurz, jinak 0."""
+    if s.get("hodnota_bez_dph"):
+        return s["hodnota_bez_dph"]
+    if s.get("hodnota_s_dph"):
+        return s["hodnota_s_dph"] / 1.21
+    castka, mena = s.get("cizi_mena") or (None, "")
+    if castka and mena in KURZ_ORIENTACNI:
+        return castka * KURZ_ORIENTACNI[mena]
+    return 0.0
 
 
 def is_relevant(sml, keywords_norm, ico_set):

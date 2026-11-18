@@ -54,7 +54,7 @@ class Otazky(unittest.TestCase):
         self.assertIn("ci", rc)
         f1 = onboarding.faze1_pravidla(rc)
         ids = [q["id"] for q in f1["questions"]]
-        self.assertEqual(ids, ["q1_scope", "q5_strategy", "q6_competitors", "q2_budget", "q3_region", "q4_qualification"])
+        self.assertEqual(ids, ["q1_scope", "q5_strategy", "q6_competitors", "q2_budget", "q2_prep", "q3_region", "q4_qualification"])
         for q in f1["questions"]:
             self.assertTrue(q["proc"])
             self.assertIsInstance(q["evidence"], list)
@@ -85,6 +85,32 @@ class Otazky(unittest.TestCase):
         z = onboarding.zpravodaj(self.con, onboarding._ocisti_profil(p, {"company_profile": p}, rc))
         for x in z["polozky"]:
             self.assertIn("sledovani", x)
+
+
+    def test_nace_nepridava_obory_firme_s_historii(self):
+        """ARES zivnosti (napr. stravovani u e-shopu) nesmi do profilu, kdyz firma ma vlastni historii zakazek."""
+        rc = onboarding.recon(self.con, {"zdroje": {"ares_base": "x"}}, self.ico, online=False)
+        rc["ares"] = {**(rc.get("ares") or {}), "nace": "56100,49410"}
+        f1 = onboarding.faze1_pravidla(rc)
+        p = onboarding.faze2_pravidla(rc, f1, {})["company_profile"]
+        if sum(c["pocet"] for c in rc["historie"]["top_cpv"]) >= 5:
+            vse = p["cpv_codes"]["main"] + p["cpv_codes"]["secondary"]
+            self.assertFalse([c for c in vse if c[:2] in ("55", "60")], vse)
+
+    def test_strategie_nove_zakazniky(self):
+        rc = onboarding.recon(self.con, {"zdroje": {"ares_base": "x"}}, self.ico, online=False)
+        f1 = onboarding.faze1_pravidla(rc)
+        p = onboarding.faze2_pravidla(rc, f1, {"q5_strategy": {"vybrano": [f1["questions"][1]["quick_replies"][1]], "text": ""}})
+        self.assertEqual(p["company_profile"]["strategy"], "novi_zadavatele")
+
+
+class CiziMena(unittest.TestCase):
+    def test_hodnota_v_cizi_mene(self):
+        from ts.sources.smlouvy import hodnota_kc
+        self.assertEqual(hodnota_kc({"hodnota_bez_dph": 100.0, "cizi_mena": (5.0, "EUR")}), 100.0)
+        self.assertAlmostEqual(hodnota_kc({"hodnota_bez_dph": None, "hodnota_s_dph": 121.0}), 100.0)
+        self.assertEqual(hodnota_kc({"hodnota_bez_dph": None, "hodnota_s_dph": None, "cizi_mena": (1000.0, "EUR")}), 25000.0)
+        self.assertEqual(hodnota_kc({"hodnota_bez_dph": None, "hodnota_s_dph": None, "cizi_mena": (1000.0, "XYZ")}), 0.0)
 
 
 if __name__ == "__main__":

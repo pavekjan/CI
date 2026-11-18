@@ -71,12 +71,14 @@ export default function Firma({ ico, prazdnaDb }: { ico: string; prazdnaDb?: boo
               IČO {p.ico}
               {p.ares?.sidlo && <> · {p.ares.sidlo}</>}
               {p.ares?.datum_vzniku && <> · vznik {datum(p.ares.datum_vzniku)}</>}
-              {p.ares?.nace && <> · NACE {p.ares.nace.split(",").slice(0, 4).join(", ")}</>}
+              {p.ares?.nace && <> · <span title="Kódy činností (NACE) zapsané v ARES. Velké firmy jich mívají desítky, proto jsou jen orientační." style={{ textDecoration: "underline dotted", cursor: "help" }}>činnosti v ARES</span> {p.ares.nace.split(",").slice(0, 4).join(", ")}</>}
             </div>
           </div>
           <div className="row small">
             <a href={`https://ares.gov.cz/ekonomicke-subjekty?ico=${p.ico}`} target="_blank" rel="noreferrer">ARES ↗</a>
             <a href={`https://www.hlidacstatu.cz/subjekt/${p.ico}`} target="_blank" rel="noreferrer">Hlídač státu ↗</a>
+            <a href={`https://or.justice.cz/ias/ui/rejstrik-$firma?ico=${p.ico}`} target="_blank" rel="noreferrer"
+              title="Obchodní rejstřík: ve Sbírce listin jsou výroční zprávy a účetní závěrky (obrat, zisk, zaměstnanci)">Obchodní rejstřík ↗</a>
             <a className="btn" href={`#/onboarding/${p.ico}`} title="4 otázky, profil firmy a zakázky, které by ji zajímaly">Onboarding a zpravodaj</a>
             {!bezDat && (
               <button className="btn primary" onClick={doExport} disabled={expBusy} title="Vytvoří propojené poznámky (knowledge graph) pro Obsidian">
@@ -104,14 +106,26 @@ export default function Firma({ ico, prazdnaDb }: { ico: string; prazdnaDb?: boo
         </div>
         ) : (
         <div className="card empty">
-          <p><b>V načtených datech nemá tato firma žádnou zakázku.</b></p>
-          <p>Buď se veřejných zakázek neúčastní, nebo v období, které máte stažené, nesoutěžila. Zkuste na stránce <a href="#/data">Data</a> stáhnout delší období.</p>
+          <p><b>Tahle firma ve veřejných soutěžích v našich datech nevystupuje.</b></p>
+          <p>
+            {p.registr && p.registr.pocet > 0
+              ? <>V Registru smluv má {num(p.registr.pocet)} {p.registr.pocet === 1 ? "smlouvu" : p.registr.pocet < 5 ? "smlouvy" : "smluv"} se státem za {kc(p.registr.objem)}.</>
+              : <>V Registru smluv za sledované období nemá žádnou smlouvu se státem.</>}
+          </p>
+          <p style={{ maxWidth: 760, margin: "8px auto 0", textAlign: "left" }} className="small secondary">
+            <b>To ale neznamená, že je firma malá.</b> Veřejná data ukazují jen obchody se státem: soutěže a smlouvy s úřady,
+            obcemi a státními firmami nad 50 tis. Kč. Nejsou v nich zakázky pro soukromé firmy (u deratizace, úklidu nebo
+            dodávek jsou to často hlavní zákazníci), drobné objednávky pod 50 tis. Kč ani smlouvy, které zákon o registru smluv
+            ze zveřejnění vyjímá. Skupina firem navíc může se státem obchodovat přes jinou dceřinou firmu s jiným IČO, zkuste
+            ji vyhledat podle názvu. Jak firma celkově stojí (obrat, zisk, zaměstnanci), ukáže výroční zpráva ve{" "}
+            <a href={`https://or.justice.cz/ias/ui/rejstrik-$firma?ico=${p.ico}`} target="_blank" rel="noreferrer">Sbírce listin obchodního rejstříku ↗</a>.
+          </p>
         </div>
         )
       ) : (
         <>
           {/* skore */}
-          <Card title="Skóre konkurenceschopnosti" sub="Vážený průměr pěti složek (0–100) ze soutěží (RVZ) i Registru smluv. Každá složka ukazuje, z čeho vychází."
+          <Card title="Skóre konkurenceschopnosti" sub="Vážený průměr pěti složek (0–100) ze soutěží i z Registru smluv. Každá složka ukazuje, z čeho vychází."
             right={p.skore.malo_dat ? <span className="badge warn" title="Málo soutěží nebo složek – skóre je jen orientační">málo dat</span> : undefined}>
             <div className="grid scoregrid">
               <div className="score">
@@ -135,7 +149,7 @@ export default function Firma({ ico, prazdnaDb }: { ico: string; prazdnaDb?: boo
           {/* odkud data jsou */}
           <div className="callout info small">
             <b>Proč jsou čísla jiná než na Hlídači státu?</b>{" "}
-            <b>Soutěže (RVZ)</b>{p.obdobi?.rvz_od ? <> za {mesic(p.obdobi.rvz_od)} – {mesic(p.obdobi.rvz_do!)}</> : null}: zakázky z věstníku
+            <b>Soutěže</b>{p.obdobi?.rvz_od ? <> za {mesic(p.obdobi.rvz_od)} – {mesic(p.obdobi.rvz_do!)}</> : null}: zakázky z věstníku
             a NEN, které se v tom období zveřejnily nebo změnily (proto i starší velké stavby, u kterých se v té době
             měnila smlouva). <b>Registr smluv</b>{p.obdobi?.rs_od ? <> za {mesic(p.obdobi.rs_od)} – {mesic(p.obdobi.rs_do!)}</> : null}: zveřejněné
             smlouvy nad 50 tis. Kč, tedy i malé zakázky a objednávky. Hlídač státu ukazuje <b>celou historii od roku 2016</b> a navíc
@@ -150,15 +164,26 @@ export default function Firma({ ico, prazdnaDb }: { ico: string; prazdnaDb?: boo
             </>}
           </div>
 
+          {k.vyhry === 0 && Math.max(k.smluv_rs_souhrn ?? 0, k.smluv_rs) <= 3 && (
+            <div className="callout small">
+              <b>Málo dat neznamená malou firmu.</b> Veřejná data ukazují jen obchody se státem: soutěže a smlouvy
+              s úřady, obcemi a státními firmami nad 50 tis. Kč. Nejsou v nich zakázky pro soukromé firmy (u deratizace,
+              úklidu nebo dodávek jsou to často hlavní zákazníci), drobné objednávky pod 50 tis. Kč ani smlouvy,
+              které zákon o registru smluv ze zveřejnění vyjímá (např. u některých obcí a státních firem). Skupina firem může navíc s úřady uzavírat smlouvy přes jinou dceřinou
+              společnost s jiným IČO. Jak firma celkově stojí (obrat, zisk, zaměstnanci), ukáže výroční zpráva ve{" "}
+              <a href={`https://or.justice.cz/ias/ui/rejstrik-$firma?ico=${p.ico}`} target="_blank" rel="noreferrer">Sbírce listin obchodního rejstříku ↗</a>.
+            </div>
+          )}
+
           {/* KPI */}
           <div className="grid g4">
-            <Kpi label="Vyhrané soutěže (RVZ)" value={num(k.vyhry)} note={`${num(k.ucasti)} účastí celkem`} />
+            <Kpi label="Vyhrané soutěže" value={num(k.vyhry)} note={`${num(k.ucasti)} účastí celkem`} />
             <Kpi label="Win rate" value={pct(k.win_rate)} note={k.win_rate === null ? "zdroj neuvádí neúspěšné nabídky" : `ze ${num(k.ucasti_zname)} soutěží se známými účastníky`} />
             <Kpi label="Objem výher (bez DPH)" value={kc(k.objem)} note={`medián zakázky ${kc(k.median_cena)}`} />
             <Kpi label="Cena vs. předpokládaná hodnota" value={pct(k.median_pomer)} note={`trh ve stejných segmentech ${pct(k.trh_median_pomer)}`} />
           </div>
           <div className="grid g4">
-            <Kpi label="Zákazníků (zadavatelů)" value={num(k.klientu)} />
+            <Kpi label="Zákazníků ze soutěží" value={num(k.klientu)} note="úřady, u kterých vyhrála soutěž" />
             <Kpi label="Ø nabídek v soutěžích, které vyhrála" value={num(k.prumer_nabidek, 1)} note={k.s_poctem_nabidek ? `${k.jedna_nabidka}× byla jediným uchazečem` : undefined} />
             <Kpi label="Smlouvy v Registru smluv" value={num(Math.max(k.smluv_rs_souhrn ?? 0, k.smluv_rs))}
               note={`${kc(Math.max(k.objem_rs_souhrn ?? 0, k.objem_rs))}${p.registr ? ` · ${num(p.registr.zadavatelu)} odběratelů` : ""}`} />
@@ -167,7 +192,7 @@ export default function Firma({ ico, prazdnaDb }: { ico: string; prazdnaDb?: boo
 
           {p.registr && p.registr.pocet > 0 && (
             <div className="grid g2">
-              <Card title="Smlouvy z Registru smluv po měsících" sub="Počet zveřejněných smluv podle data uzavření (včetně malých zakázek mimo RVZ).">
+              <Card title="Smlouvy z Registru smluv po měsících" sub="Počet zveřejněných smluv podle data uzavření (i malé zakázky, které v registru soutěží nejsou).">
                 <div style={{ height: 220 }}>
                   <ResponsiveContainer>
                     <BarChart data={p.registr.mesice} margin={{ top: 8, right: 8, left: 0, bottom: 0 }} barCategoryGap="22%">
@@ -181,7 +206,7 @@ export default function Firma({ ico, prazdnaDb }: { ico: string; prazdnaDb?: boo
                   </ResponsiveContainer>
                 </div>
               </Card>
-              <Card title="Odběratelé podle Registru smluv" sub="Veřejní zadavatelé podle objemu smluv (bez DPH).">
+              <Card title="Odběratelé podle Registru smluv" sub="Součet smluv bez DPH, u kterých je cena zveřejněná. Zákon dovoluje cenu neuvést (obchodní tajemství, dohody o mlčenlivosti, rámcové smlouvy), proto u odběratele s mnoha smlouvami může být částka nízká. Jedna velká smlouva (třeba nákup vlaků) naopak převáží stovky drobných objednávek.">
                 <BarList items={p.registr.odberatele} value={(c) => c.objem} label={(c) => c.nazev} right={(c) => <>{kc(c.objem)} · {num(c.pocet)}×</>} />
               </Card>
             </div>
@@ -225,7 +250,7 @@ export default function Firma({ ico, prazdnaDb }: { ico: string; prazdnaDb?: boo
           </Card>
 
           <div className="grid g2">
-            <Card title="Segmenty (oddíly CPV)" sub="Objem výher; vpravo podíl na objemu segmentu a pořadí mezi dodavateli.">
+            <Card title="Obory, ve kterých firma vyhrává" sub="Objem výher; vpravo podíl na objemu segmentu a pořadí mezi dodavateli.">
               <BarList
                 items={p.segmenty}
                 value={(s) => s.objem}
@@ -297,7 +322,7 @@ export default function Firma({ ico, prazdnaDb }: { ico: string; prazdnaDb?: boo
                 </>
               )}
             </Card>
-            <Card title="Hlavní rivalové v segmentech" sub="Kdo vyhrává nejvíc ve stejných oddílech CPV (i bez přímého střetu).">
+            <Card title="Hlavní rivalové v segmentech" sub="Kdo vyhrává nejvíc ve stejných oborech (i když se s firmou v soutěži přímo nepotkal).">
               <BarList items={p.rivalove} value={(r) => r.objem} label={(r) => r.nazev} right={(r) => <>{kc(r.objem)} · {r.vyhry}×</>} onClick={(r) => go(`/firma/${r.ico}`)} />
             </Card>
           </div>
@@ -350,7 +375,7 @@ export default function Firma({ ico, prazdnaDb }: { ico: string; prazdnaDb?: boo
                       <td className="num">{z.nabidek ?? "–"}</td>
                       <td>
                         <span className={`badge ${z.vysledek === "výhra" ? "good" : "neutral"}`}>{z.vysledek === "výhra" ? "✓ výhra" : "✕ neúspěch"}</span>
-                        {z.overeno_rs && <span className="muted small" title="Smlouva nalezena v Registru smluv"> · RS ✓</span>}
+                        {z.overeno_rs && <span className="muted small" title="Smlouva nalezena v Registru smluv"> · v Registru smluv ✓</span>}
                       </td>
                     </tr>
                   ))}

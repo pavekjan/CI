@@ -236,9 +236,7 @@ def scout_hlidac(con, cfg):
 
 
 def _hodnota_smlouvy(s):
-    if s["hodnota_bez_dph"]:
-        return s["hodnota_bez_dph"]
-    return (s["hodnota_s_dph"] or 0) / 1.21
+    return smlouvy.hodnota_kc(s)
 
 
 def scout_smlouvy(con, cfg):

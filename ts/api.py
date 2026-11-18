@@ -60,7 +60,8 @@ def _pc(x):
 
 def _kc(x):
     x = x or 0
-    return f"{x / 1e9:.1f} mld. Kč" if x >= 1e9 else f"{x / 1e6:.1f} mil. Kč" if x >= 1e6 else f"{x / 1e3:.0f} tis. Kč"
+    t = f"{x / 1e9:.1f} mld. Kč" if x >= 1e9 else f"{x / 1e6:.1f} mil. Kč" if x >= 1e6 else f"{x / 1e3:.0f} tis. Kč"
+    return t.replace(".", ",", 1) if x >= 1e6 else t  # cesky desetinna carka
 
 
 def _pomer(cena, odhad, nazev=None):
@@ -332,13 +333,13 @@ def predpocitat(con):
 # ---------------------------------------------------------------- stav dat
 def rozsah_dat(con):
     """Obdobi, ktere data pokryvaji. Nekolik zakazek ma datum zahajeni o roky drive (dlouhe ramcove smlouvy,
-    preklepy), proto se zacatek bere jako 1. percentil, ne minimum. Konec nesmi byt v budoucnosti."""
+    preklepy), proto se zacatek bere jako 5. percentil, ne minimum. Konec nesmi byt v budoucnosti."""
     pl = "datum_zahajeni >= '2000' AND datum_zahajeni <= date('now', '+1 day')"
     n = con.execute(f"SELECT COUNT(*) FROM zakazky WHERE {pl}").fetchone()[0]  # nosec B608 - pl je konstanta
     if not n:
         return (None, None)
     od = con.execute(f"SELECT datum_zahajeni FROM zakazky WHERE {pl} ORDER BY datum_zahajeni LIMIT 1 OFFSET ?",  # nosec B608
-                     (n // 100,)).fetchone()[0]
+                     (n // 20,)).fetchone()[0]
     do = con.execute(f"SELECT MAX(datum_zahajeni) FROM zakazky WHERE {pl}").fetchone()[0]  # nosec B608
     return (od, do)
 
@@ -417,11 +418,11 @@ def _spocti_stav(con):
 def stav(con, demo=False):
     last = con.execute("SELECT konec FROM behy WHERE stav='ok' ORDER BY id DESC LIMIT 1").fetchone()
     # prazdna databaze (behem prvniho stahovani) se do cache neuklada, aby se cisla po nacteni dat obnovila
-    zaklad = _cached(con, "stav", lambda: _spocti_stav(con)) if not demo else _spocti_stav(con)
+    zaklad = _cached(con, "stav2", lambda: _spocti_stav(con)) if not demo else _spocti_stav(con)
     if not zaklad["zakazek"]:
-        _PAMET.pop("stav", None)
+        _PAMET.pop("stav2", None)
         try:
-            con.execute("DELETE FROM cache WHERE klic='stav'")
+            con.execute("DELETE FROM cache WHERE klic='stav2'")
         except Exception:  # nosec B110
             pass
     return {"demo": demo, **zaklad,

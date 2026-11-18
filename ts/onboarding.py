@@ -287,9 +287,92 @@ def auto_cpv(con, ico, vyhry):
             "zdroj": ", ".join(f"{k} {n}" for k, n in zdroje[c].items())} for c, b in body.most_common(12)]
     n_v = sum(1 for v in vyhry if v["cpv_hlavni"])
     n_u = sum(z.get("nabídky", 0) for z in zdroje.values())
-    popis = (f"CPV doplněno automaticky z historie firmy: {n_v} vyhraných zakázek, {n_u} podaných nabídek"
+    popis = (f"Obory (kódy CPV) doplněné automaticky z historie firmy: {n_v} vyhraných zakázek, {n_u} podaných nabídek"
              f" a {n_rs} smluv z Registru smluv." if top else "")
     return {"top_cpv": top, "cpv_zdroj": popis}
+
+
+# Typ zakaznika podle nazvu zadavatele (poradi je dulezite: "Krajska nemocnice" je nemocnice, ne kraj)
+TYPY_ZAKAZNIKU = [
+    (r"nemocnic|zdravotn|lecebn|zachrann|hygienick|lazen", "nemocnice a zdravotnictví"),
+    (r"ministerstvo obrany|vojensk|armad|vojenske", "armáda"),
+    (r"policie|hasic|vezensk|soud|statni zastupitelstv|celni", "policie, hasiči, vězeňství a justice"),
+    (r"skol|gymnazi|univerzit|vysoke uceni|uciliste|akademie|ustav .* av cr|akademie ved", "školy, univerzity a výzkum"),
+    (r"domov|socialn|senior|pecovatel|dusevni", "domovy a sociální služby"),
+    (r"doprav|drahy|zeleznic|letiste|silnic|dalnic|rizeni letoveho", "doprava (dráhy, silnice, dopravní podniky)"),
+    (r"kraj", "kraje"),
+    (r"^mesto|^obec|mestska cast|statutarni|^mestys|magistrat|mestsky urad|obecni urad", "obce a města"),
+    (r"ministerstv|urad|statni|sprava|agentura|fond|inspekce|cesky|ceska|narodni", "ministerstva a státní instituce"),
+]
+
+
+def typ_zakaznika(nazev):
+    n = norm(nazev or "")
+    if not n:
+        return None
+    for vzor, typ in TYPY_ZAKAZNIKU:
+        if re.search(vzor, n):
+            return typ
+    return "ostatní (firmy státu, muzea, divadla…)"
+
+
+# Co firma prodava: oddil CPV -> typ (zbozi / sluzby / stavby / IT) pro lidsky popis a vyber otazek
+def typ_oddilu(oddil):
+    if oddil == "45":
+        return "stavby"
+    if oddil in ("48", "72"):
+        return "it"
+    if oddil and oddil < "45":
+        return "zbozi"
+    return "sluzby"
+
+
+# co firma prodava ve 4. pade ("prodava hlavne pocitace a kancelarskou techniku")
+CO_PRODAVA = {
+    "03": "zemědělské a lesnické produkty", "09": "paliva a energie", "14": "suroviny a kovy", "15": "potraviny a nápoje",
+    "16": "zemědělské stroje", "18": "oděvy a obuv", "19": "textil, kůži a plasty", "22": "tiskoviny", "24": "chemické výrobky",
+    "30": "počítače a kancelářskou techniku", "31": "elektrické stroje a přístroje", "32": "komunikační a audiovizuální techniku",
+    "33": "zdravotnické přístroje a léčiva", "34": "dopravní prostředky a díly k nim", "35": "bezpečnostní a obranné vybavení",
+    "37": "sportovní potřeby a hudební nástroje", "38": "laboratorní a měřicí přístroje", "39": "nábytek a vybavení",
+    "41": "vodu", "42": "průmyslové stroje", "43": "důlní a stavební stroje", "44": "stavební materiál a konstrukce",
+    "45": "stavební práce", "48": "software a informační systémy", "50": "opravy a údržbu", "51": "instalace zařízení",
+    "55": "stravování a ubytování", "60": "dopravu", "63": "služby v dopravě", "64": "poštovní a telekomunikační služby",
+    "65": "energie a vodu", "66": "finanční a pojišťovací služby", "70": "realitní služby", "71": "projekce a inženýrské služby",
+    "72": "IT služby", "73": "výzkum a vývoj", "75": "služby pro veřejnou správu", "77": "zahradnické a zemědělské služby",
+    "79": "právní, marketingové a personální služby", "80": "vzdělávání a školení", "85": "zdravotní a sociální služby",
+    "90": "úklid, odvoz odpadů a péči o životní prostředí", "92": "kulturní a sportovní služby", "98": "ostatní služby",
+}
+
+
+def co_prodava(o):
+    return CO_PRODAVA.get(o["oddil"]) or f"„{o['nazev']}“"
+
+
+SLOVESO = {"zbozi": "prodává státu hlavně", "stavby": "dělá pro stát hlavně", "it": "dodává státu hlavně",
+           "sluzby": "poskytuje státu hlavně"}
+
+
+def identita(rc):
+    """Kdo firma je, srozumitelne: co prodava (podle vyhranych soutezi), komu a jaky je to typ dodavatele.
+    Jen z dat (soutěze, Registr smluv, ARES), zadny odhad modelu."""
+    h = rc["historie"]
+    seg = [x for x in h["segmenty"] if x["segment"] != "neuvedeno"]
+    celkem = sum(x["pocet"] for x in seg)
+    obory = [{"oddil": x["segment"][:2], "nazev": CPV_DIV.get(x["segment"][:2], x["segment"][3:]),
+              "podil": x["pocet"] / celkem if celkem else 0, "pocet": x["pocet"]} for x in seg[:3]]
+    zdroj = "soutěže"
+    if not obory:
+        nc = nace_cpv(rc)
+        obory = [{"oddil": codes[0][:2], "nazev": popis, "podil": None, "pocet": 0} for popis, codes in nc[:3]]
+        zdroj = "ARES" if obory else None
+    typ = typ_oddilu(obory[0]["oddil"]) if obory else None
+    typy_z = [x["typ"] for x in h.get("typy_zakazniku") or [] if not x["typ"].startswith("ostatní")][:3]
+    return {"typ": typ, "obory": obory, "zakaznici": typy_z, "zdroj": zdroj}
+
+
+def _vyjmenuj(xs):
+    xs = [x for x in xs if x]
+    return xs[0] if len(xs) == 1 else ", ".join(xs[:-1]) + " a " + xs[-1] if xs else ""
 
 
 def _historie(con, ico):
@@ -316,14 +399,17 @@ def _historie(con, ico):
         """SELECT s.predmet, s.hodnota_bez_dph, s.datum_uzavreni, s.zadavatel_ico, s.zadavatel_nazev
            FROM smlouvy_strany st JOIN smlouvy s ON s.id=st.smlouva_id WHERE st.ico=? ORDER BY s.datum_uzavreni DESC""", (ico,))]
     rs_zad = Counter((s["zadavatel_ico"], s["zadavatel_nazev"]) for s in rs if s["zadavatel_ico"])
+    typy = Counter(typ_zakaznika(v["zadavatel_nazev"]) for v in vyhry) + Counter(typ_zakaznika(s["zadavatel_nazev"]) for s in rs)
+    typy.pop(None, None)
     return {
         "vyher": len(vyhry), "ucasti": ucasti, "objem_czk": round(sum(v["cena_bez_dph"] or 0 for v in vyhry)),
-        "median_zakazky_czk": _median(ceny), "p25_czk": q(0.25), "p75_czk": q(0.75), "max_czk": ceny[-1] if ceny else None,
+        "median_zakazky_czk": _median(ceny), "p10_czk": q(0.1), "p25_czk": q(0.25), "p75_czk": q(0.75), "p90_czk": q(0.9), "max_czk": ceny[-1] if ceny else None,
         **auto_cpv(con, ico, vyhry),
         # "neuvedeno" (zakazky bez CPV a bez odhadu) neni obor -> do profilu ani otazek nepatri
         "segmenty": [{"segment": s, "pocet": n} for s, n in seg.most_common(7) if s != "neuvedeno"][:6],
         "top_zadavatele": sorted(({"ico": k, **v} for k, v in zad.items()), key=lambda x: (-x["pocet"], -x["objem"]))[:10],
         "kraje": [{"nuts3": k, "kraj": nazev_kraje(k), "pocet": n} for k, n in kraje.most_common()],
+        "typy_zakazniku": [{"typ": k, "pocet": n} for k, n in typy.most_common(5)],
         "nazvy_vyher": [v["nazev"] for v in sorted(vyhry, key=lambda x: x["datum_zahajeni"] or "", reverse=True)[:25]],
         "registr_smluv": {"pocet": len(rs), "objem_czk": round(sum(s["hodnota_bez_dph"] or 0 for s in rs)),
                           "predmety": [s["predmet"] for s in rs[:15]],
@@ -464,7 +550,7 @@ def _ci(con, ico, hist):
                    "zdroj": "ISVZ (účastníci soutěží)", "rating": "A1", "jistota": "vysoká" if s0["stretu"] >= 3 else "střední"})
     elif vse:
         zj.append({"text": "U vašich soutěží zdroj neuvádí ostatní účastníky – přímé souboje zatím nelze určit, "
-                           "konkurenty odvozuji od lídrů vašich segmentů.", "zdroj": "ISVZ", "rating": "A1", "jistota": "nízká"})
+                           "konkurenty odvozuji od největších firem ve vašem oboru.", "zdroj": "ISVZ", "rating": "A1", "jistota": "nízká"})
     k = out["koncentrace"]
     if k and k["zakazniku"] >= 2:
         zj.append({"text": f"Největší zákazník {k['top_nazev']} tvoří {k['top_podil'] * 100:.0f} % vašich veřejných tržeb "
@@ -474,7 +560,7 @@ def _ci(con, ico, hist):
     if out["bila_mista"]:
         b0 = out["bila_mista"][0]
         zj.append({"text": f"Bílé místo: u {_tvar(b0['zakazniku'], 'vašeho zákazníka', 'vašich zákazníků', 'vašich zákazníků')} vyhrávají "
-                           f"vaši konkurenti i v segmentu {b0['segment']} ({_tvar(b0['pocet'], 'zakázka', 'zakázky', 'zakázek')} "
+                           f"vaši konkurenti i v oboru {b0['segment'].split(' ', 1)[-1].lower()} ({_tvar(b0['pocet'], 'zakázka', 'zakázky', 'zakázek')} "
                            f"za {kc(b0['objem'])} za 3 roky" + (f", hlavně {b0['lidr']}" if b0["lidr"] else "")
                            + ") – vy tam zatím nedodáváte.",
                    "zdroj": "ISVZ (vítězové u vašich zákazníků)", "rating": "A1", "jistota": "střední"})
@@ -484,7 +570,103 @@ def _ci(con, ico, hist):
         zj.append({"text": f"Počet vyhraných soutěží {zm}: {t['posl12']} za posledních 12 měsíců dat vs. {t['pred12']} v předchozích 12.",
                    "zdroj": "ISVZ", "rating": "A1", "jistota": "střední" if t["posl12"] + t["pred12"] >= 5 else "nízká"})
     out["souboje_n"] = n_s
+    out["porter"] = _porter(con, ico, hist, out)
     return out
+
+
+def _porter(con, ico, hist, ci):
+    """Porterovych pet sil pro hlavni obor firmy, jen z dat verejnych zakazek (posledni rok dat).
+    Co z verejnych zakazek zmerit nejde (sila dodavatelu firmy, substituty), je oznacene jako uvaha k doplneni,
+    ne jako zjisteni - v CI se fakta a odhady nesmi michat."""
+    seg = [x for x in hist["segmenty"] if x["segment"] != "neuvedeno"]
+    if not seg:
+        return None
+    oddil = seg[0]["segment"][:2]
+    obor = CPV_DIV.get(oddil, oddil)
+    from .api import _cached
+    t = _cached(con, f"porter:{oddil}", lambda: _trh_oboru(con, oddil))
+    if not t:
+        return None
+    zak_n, prumer_nab, jedna, jen_cena, cr5, cr5_zad, vitezu, novi_n, novi_podil, max_d = (
+        t["zakazek"], t["prumer_nab"], t["jedna"], t["jen_cena"], t["cr5"], t["cr5_zad"], t["vitezu"], t["novi"], t["novi_podil"], t["do"])
+    cislo = lambda n: f"{n:,}".replace(",", "\u00a0")  # noqa: E731
+    pct = lambda x: f"{x * 100:.0f} %"  # noqa: E731
+    sily = []
+
+    # 1) rivalita mezi konkurenty
+    if prumer_nab is not None or cr5 is not None:
+        vys = (prumer_nab or 0) >= 3.5 or (cr5 is not None and cr5 < 0.25)
+        niz = (prumer_nab is not None and prumer_nab < 2) or (cr5 is not None and cr5 > 0.6)
+        txt = [f"Za poslední rok dat {cislo(zak_n)} soutěží, vyhrálo je {cislo(vitezu)} různých firem"]
+        if prumer_nab is not None:
+            txt.append(f"průměrně {prumer_nab:.1f}".replace(".", ",") + " nabídky na soutěž" + (f", {pct(jedna)} soutěží mělo jedinou nabídku" if jedna else ""))
+        if cr5 is not None:
+            txt.append(f"pět největších dodavatelů má {pct(cr5)} objemu")
+        sily.append({"sila": "Rivalita mezi konkurenty", "hodnoceni": "vysoká" if vys else "nízká" if niz else "střední",
+                     "text": "; ".join(txt) + ".", "zdroj": "ISVZ", "jistota": "vysoká" if zak_n >= 100 else "střední"})
+    # 2) vyjednavaci sila odberatelu (zadavatelu)
+    k = ci.get("koncentrace") or {}
+    if jen_cena is not None or cr5_zad is not None:
+        vys = (jen_cena or 0) >= 0.8 or (k.get("top_podil") or 0) >= 0.4
+        niz = (jen_cena is not None and jen_cena < 0.4) and (k.get("top_podil") or 0) < 0.2
+        txt = []
+        if jen_cena is not None:
+            txt.append(f"v {pct(jen_cena)} soutěží rozhoduje jen cena")
+        if cr5_zad is not None:
+            txt.append(f"pět největších zadavatelů nakupuje {pct(cr5_zad)} objemu oboru")
+        if k.get("top_podil"):
+            txt.append(f"váš největší zákazník vám dává {pct(k['top_podil'])} tržeb od státu")
+        sily.append({"sila": "Síla odběratelů (zadavatelů)", "hodnoceni": "vysoká" if vys else "nízká" if niz else "střední",
+                     "text": ("; ".join(txt) + ".")[:1].upper() + ("; ".join(txt) + ".")[1:], "zdroj": "ISVZ + Registr smluv", "jistota": "střední"})
+    # 3) hrozba novych konkurentu
+    if novi_podil is not None:
+        sily.append({"sila": "Hrozba nových konkurentů", "hodnoceni": "vysoká" if novi_podil >= 0.3 else "nízká" if novi_podil < 0.1 else "střední",
+                     "text": f"Nováčci (předchozí 2 roky v oboru nevyhráli): {cislo(novi_n)} z {cislo(vitezu)} vítězných firem, dohromady {pct(novi_podil)} objemu.",
+                     "zdroj": "ISVZ", "jistota": "střední"})
+    # 4-5) co z verejnych dat zjistit nejde - uvaha pro uzivatele, ne zjisteni
+    sily.append({"sila": "Hrozba náhražek (substitutů)", "hodnoceni": "posuďte sami",
+                 "text": "Z veřejných zakázek se nedá změřit. Zvažte, zda úřady mohou totéž řešit jinak: vlastními silami, "
+                         "centrálním nákupem, pronájmem místo koupě nebo jinou technologií.", "zdroj": "úvaha", "jistota": "–"})
+    sily.append({"sila": "Síla vašich dodavatelů", "hodnoceni": "posuďte sami",
+                 "text": "Z veřejných dat nejde zjistit, od koho nakupujete vy. Pokud máte jednoho klíčového výrobce nebo dovozce, "
+                         "může vám zdražit nebo dodávky omezit a tím ohrozit i vaše nabídky.", "zdroj": "úvaha", "jistota": "–"})
+    return {"obor": obor, "obdobi_do": max_d[:10], "sily": sily}
+
+
+def _trh_oboru(con, oddil):
+    """Souhrn oboru (oddil CPV) za posledni rok dat - spolecny pro vsechny firmy, proto v cache."""
+    max_d = con.execute("SELECT MAX(datum_zahajeni) FROM zakazky WHERE datum_zahajeni <= ?", (date.today().isoformat(),)).fetchone()[0]
+    if not max_d:
+        return None
+    ref = date.fromisoformat(max_d[:10])
+    rok, tri = (ref - timedelta(days=365)).isoformat(), (ref - timedelta(days=3 * 365)).isoformat()
+    zak = con.execute("""SELECT pocet_nabidek, kriteria FROM zakazky
+                         WHERE datum_zahajeni > ? AND datum_zahajeni <= ? AND cpv_hlavni LIKE ?""", (rok, max_d, oddil + "%")).fetchall()
+    if len(zak) < 20:
+        return None
+    nab = [r[0] for r in zak if r[0]]
+    krit = [norm(r[1]) for r in zak if r[1]]
+    vit, zad, drive = defaultdict(float), defaultdict(float), set()
+    for d, zi, c, dz in con.execute("""SELECT v.dodavatel_ico, z.zadavatel_ico, COALESCE(v.cena_bez_dph, 0), z.datum_zahajeni
+                                       FROM vitezove v JOIN zakazky z ON z.id=v.zakazka_id
+                                       WHERE z.datum_zahajeni > ? AND z.datum_zahajeni <= ? AND z.cpv_hlavni LIKE ?""",
+                                    (tri, max_d, oddil + "%")):
+        if dz <= rok:
+            drive.add(d)
+            continue
+        if _je_ico(d):
+            vit[d] += c or 0
+        if zi:
+            zad[zi] += c or 0
+    tot_v, tot_z = sum(vit.values()), sum(zad.values())
+    novi = [d for d in vit if d not in drive]
+    return {"zakazek": len(zak), "do": max_d[:10],
+            "prumer_nab": sum(nab) / len(nab) if nab else None,
+            "jedna": sum(1 for x in nab if x == 1) / len(nab) if nab else None,
+            "jen_cena": sum(1 for k in krit if "cena" in k and "kvalit" not in k) / len(krit) if len(krit) >= 10 else None,
+            "cr5": sum(sorted(vit.values(), reverse=True)[:5]) / tot_v if tot_v else None,
+            "cr5_zad": sum(sorted(zad.values(), reverse=True)[:5]) / tot_z if tot_z else None,
+            "vitezu": len(vit), "novi": len(novi), "novi_podil": sum(vit[d] for d in novi) / tot_v if tot_v else None}
 
 
 def recon(con, cfg, ico, web_url=None, online=True):
@@ -502,20 +684,22 @@ def recon(con, cfg, ico, web_url=None, online=True):
         hlidac = f_hl.result() if f_hl else None
     nazev = (ares or {}).get("nazev") or (con.execute("SELECT nazev FROM dodavatele WHERE ico=?", (ico,)).fetchone() or [None])[0]
     zdroje = [{"id": "ARES", "nazev": "ARES – ekonomické subjekty", "url": f"https://ares.gov.cz/ekonomicke-subjekty?ico={ico}", "rating": "A1", "ok": bool(ares)},
-              {"id": "RVZ", "nazev": "Open data ISVZ (NEN, Věstník VZ)", "url": "https://isvz.nipez.cz/", "rating": "A1", "ok": hist["vyher"] + hist["ucasti"] > 0},
+              {"id": "RVZ", "nazev": "Registr veřejných zakázek (ISVZ)", "url": "https://isvz.nipez.cz/", "rating": "A1", "ok": hist["vyher"] + hist["ucasti"] > 0},
               {"id": "RS", "nazev": "Registr smluv", "url": "https://smlouvy.gov.cz/", "rating": "A1", "ok": hist["registr_smluv"]["pocet"] > 0}]
     if hlidac is not None:
         zdroje.append({"id": "HS", "nazev": "Hlídač státu – smlouvy (3 roky)", "url": f"https://www.hlidacstatu.cz/subjekt/{ico}", "rating": "B2", "ok": "chyba" not in hlidac})
     if web is not None:
         zdroje.append({"id": "WEB", "nazev": "Web firmy", "url": web.get("url"), "rating": "C3", "ok": "chyba" not in web})
     log(A, f"Recon {ico}: {nazev} – {hist['vyher']} výher, {hist['registr_smluv']['pocet']} smluv RS ({(datetime.now() - t0).total_seconds():.1f} s)")
-    return {"ico": ico, "nazev": nazev or ico, "ares": ares, "sidlo": sidlo_firmy(ares), "historie": hist,
-            "hlidac_statu": hlidac, "web": web, "zdroje": zdroje, "ci": ci}
+    out = {"ico": ico, "nazev": nazev or ico, "ares": ares, "sidlo": sidlo_firmy(ares), "historie": hist,
+           "hlidac_statu": hlidac, "web": web, "zdroje": zdroje, "ci": ci}
+    out["identita"] = identita(out)
+    return out
 
 
 # ------------------------------------------------------------------ vertikala
 VERT_CPV = {"45": "stavebnictvi", "44": "stavebnictvi", "43": "stavebnictvi", "71": "stavebnictvi",
-            "72": "it_sw", "48": "it_sw", "30": "it_sw", "32": "it_sw",
+            "72": "it_sw", "48": "it_sw",  # 30/32 (pocitace, elektronika) = dodavky zbozi, ne IT sluzby
             "90": "facility_sluzby", "50": "facility_sluzby", "77": "facility_sluzby", "55": "facility_sluzby", "98": "facility_sluzby",
             "79": "poradenstvi", "73": "poradenstvi", "80": "poradenstvi", "66": "poradenstvi"}
 VERT_NACE = {"41": "stavebnictvi", "42": "stavebnictvi", "43": "stavebnictvi", "71": "stavebnictvi",
@@ -601,22 +785,65 @@ def kc(x):
 
 
 # ------------------------------------------------------------------ 2a. FAZE 1 (pravidlovy zaloznik)
+SPOLEC = "Půjdeme i se společníkem / subdodavatelem"
+# Co zadavatele u dodavek zbozi typicky chteji, podle toho, co firma prodava (oddil CPV)
+KVAL_ZBOZI = {
+    "15": ["Kontrola kvality potravin (HACCP, IFS)", "Vlastní chlazená doprava", "Dodávky každý den, i o víkendu",
+           "Bio, regionální nebo dietní potraviny", "Reference u nemocnic, škol nebo armády", SPOLEC],
+    "30": ["Autorizovaný prodejce výrobců (HP, Dell, Lenovo…)", "Vlastní servis a záruční opravy", "Dodání do 48 hodin",
+           "Zpětný odběr a ekologická likvidace", "Reference ve veřejné správě", SPOLEC],
+    "32": ["Autorizovaný prodejce výrobců", "Vlastní servis a záruční opravy", "Montáž a zapojení u zákazníka",
+           "Zpětný odběr a ekologická likvidace", "Reference ve veřejné správě", SPOLEC],
+    "33": ["Povolení k distribuci léčiv nebo zdravotnických prostředků (SÚKL)", "Vlastní servis přístrojů",
+           "Školení personálu k přístrojům", "Reference u nemocnic", SPOLEC],
+    "34": ["Jsme výrobce nebo jeho autorizovaný zástupce", "Vlastní servis a náhradní díly", "Schválení vozidel / homologace",
+           "ISO 9001", "Reference u dopravců a úřadů", SPOLEC],
+    "09": ["Licence na obchod s energií nebo palivy", "Vlastní síť čerpacích stanic", "Palivové karty pro vozový park",
+           "Reference ve veřejné správě", SPOLEC],
+    "39": ["Vlastní výroba nábytku nebo vybavení", "Montáž u zákazníka", "Certifikáty bezpečnosti a ekologie (FSC, Ekoznačka)",
+           "Reference ve veřejné správě", SPOLEC],
+    None: ["Autorizovaný prodejce výrobce", "Vlastní servis", "ISO 9001", "Reference ve veřejné správě", SPOLEC],
+}
+
+
+def _od(h):
+    """Spodni hranice beznych zakazek firmy (10. percentil) - stejne cislo v dukazu i v moznosti "Jako dosud"."""
+    x = h.get("p10_czk") or h.get("p25_czk")
+    return None if x is None else float(round(x, -3) if x < 1e6 else round(x, -5))
+
+
+def _do(h):
+    x = h.get("p90_czk") or h.get("p75_czk")
+    return None if x is None else float(round(x, -3) if x < 1e6 else round(x, -5))
+
+
 def faze1_pravidla(rc):
     h, s = rc["historie"], rc["sidlo"]
     vert = urci_vertikalu(rc)
     lokalni = vert in LOKALNI_VERTIKALY
     seg = [x["segment"] for x in h["segmenty"][:3]]
-    zak = ", ".join(z["nazev"] for z in h["top_zadavatele"][:3] if z["nazev"])
-    shr = (f"{rc['nazev']} ({s.get('mesto') or s.get('kraj') or 'sídlo neuvedeno'}) působí podle dat nejspíš v oboru {VERT_NAZEV[vert]}. ")
-    if h["vyher"]:
-        shr += (f"V databázi má {h['vyher']} vyhraných zakázek za {kc(h['objem_czk'])} (medián {kc(h['median_zakazky_czk'])})"
-                + (f", hlavně v segmentech {', '.join(seg)}" if seg else "") + ". ")
-        if zak:
-            shr += f"Nejčastější zadavatelé: {zak}. "
+    idn = rc.get("identita") or identita(rc)
+    misto = s.get("mesto") or s.get("kraj")
+    shr = f"{rc['nazev']}" + (f" ({misto})" if misto else "") + " "
+    ob = idn["obory"]
+    if ob and idn["zdroj"] == "soutěže":
+        o0 = ob[0]
+        shr += (f"{SLOVESO[idn['typ']]} {co_prodava(o0)} – to je {o0['podil'] * 100:.0f} % z "
+                f"{_tvar(h['vyher'], 'vyhrané soutěže', 'vyhraných soutěží', 'vyhraných soutěží')}")
+        dalsi = [co_prodava(o) for o in ob[1:] if o["podil"] >= 0.03]
+        shr += (f", dále {_vyjmenuj(dalsi)}. " if dalsi else ". ")
+        if idn["zakaznici"]:
+            shr += f"Nejčastější zákazníci: {'; '.join(idn['zakaznici'])}. "
+        shr += (f"Vyhrané zakázky celkem za {kc(h['objem_czk'])}, typická zakázka kolem {kc(h['median_zakazky_czk'])}. "
+                if h["median_zakazky_czk"] else "")
+    elif ob:
+        shr += (f"– ve veřejných zakázkách zatím žádnou výhru nevidím. Podle živností zapsaných v ARES jde hlavně o: "
+                f"{_vyjmenuj([o['nazev'].lower() for o in ob])}. ")
     else:
-        shr += "Ve stažených datech zatím žádnou vyhranou zakázku nemá, vycházím z ARES (NACE) a webu. "
+        shr += "– ve veřejných zakázkách zatím žádnou výhru nevidím a z rejstříků nepoznám, co firma dělá. Napište to prosím do první otázky. "
     if h["registr_smluv"]["pocet"]:
-        shr += f"V Registru smluv {h['registr_smluv']['pocet']} smluv za {kc(h['registr_smluv']['objem_czk'])}."
+        shr += (f"V Registru smluv (smlouvy s úřady nad 50 tis. Kč) je {_tvar(h['registr_smluv']['pocet'], 'smlouvu', 'smlouvy', 'smluv')}"
+                + (f" za {kc(h['registr_smluv']['objem_czk'])}" if h["registr_smluv"]["objem_czk"] else "") + ".")
 
     q1 = [x["segment"].split(" ", 1)[-1] for x in h["segmenty"][:3] if x["segment"] != "neuvedeno"] or [p for p, _ in nace_cpv(rc)[:3]] or {
         "stavebnictvi": ["Pozemní stavby", "Silnice a komunikace", "Vodovody a kanalizace"],
@@ -624,85 +851,100 @@ def faze1_pravidla(rc):
         "facility_sluzby": ["Úklid", "Údržba budov", "Ostraha"],
         "dodavky_zbozi": ["Dodávky techniky", "Spotřební materiál", "Vybavení"],
         "poradenstvi": ["Právní a ekonomické poradenství", "Dotační management", "Školení"], "jine": ["Hlavní činnost firmy"]}[vert]
-    q1 = q1 + [f"Vyhnout se: {VERT_NEG[vert][0]}"] if VERT_NEG[vert] else q1
+    # "Nechceme" jen u oboru, ktery mezi nabizenymi neni (Siemens nema dostat "Stavební práce" i "Nechceme: stavební práce")
+    nabidnute = {norm(x) for x in q1}
+    neg1 = [n for n in VERT_NEG[vert] if norm(n) not in nabidnute and not any(norm(n) in x or x in norm(n) for x in nabidnute)]
+    q1 = q1 + [f"Nechceme: {neg1[0]}"] if neg1 else q1
 
     med = h["median_zakazky_czk"]
-    q2 = ["VZMR do 2 mil. Kč (služby/dodávky) / 6 mil. (stavby)", "2–10 mil. Kč", "10–50 mil. Kč", "nad 50 mil. Kč"]
+    q2 = ["Malé zakázky do 6 mil. Kč" if vert == "stavebnictvi" else "Malé zakázky do 2 mil. Kč", "2–10 mil. Kč", "10–50 mil. Kč", "nad 50 mil. Kč"]
     if med:
-        q2.insert(0, f"Jako dosud: {kc(h['p25_czk'])} – {kc(h['p75_czk'])}")
-    q2 = q2[:4] + ["Příprava nabídky min. 10 dní"]
+        q2.insert(0, f"Jako dosud: {kc(_od(h))} – {kc(_do(h))}")
+    q2 = q2[:5]
+    q_prep = ["Stačí nám 5 dní", "Aspoň 10 dní", "Aspoň 15 dní", "Aspoň 20 dní"]
 
     if lokalni:
         q3 = [f"Jen {s['kraj']}" if s.get("kraj") else "Jen kraj sídla", "Kraj sídla + sousední kraje", "Do 100 km od sídla", "Celá ČR"]
         top_k = [k["kraj"] for k in h["kraje"][:2] if k["nuts3"] != s.get("nuts3")]
         if top_k:
             q3.insert(2, "Jako dosud: " + ", ".join([s.get("kraj") or ""] + top_k).strip(", "))
-        q3_text = (f"Kam až jste ochotni jezdit? Sídlo máte v lokalitě {s.get('mesto') or s.get('kraj') or '?'}"
-                   + (f", dosud jste plnili hlavně v krajích {', '.join(k['kraj'] for k in h['kraje'][:3])}." if h["kraje"] else "."))
-        q3_cat = "Regiony a dojezd"
+        q3_text = "Jak daleko od sídla jste ochotni zakázky dělat?"
+        q3_cat = "Kde chcete pracovat"
+    elif vert == "dodavky_zbozi":
+        q3 = ["Dovezeme kamkoli v Česku", f"Jen {s['kraj']} a sousední kraje" if s.get("kraj") else "Jen náš kraj a sousední kraje",
+              "Do 100 km od sídla nebo skladu"]
+        top_k = [k["kraj"] for k in h["kraje"][:3]]
+        if top_k:
+            q3.insert(1, "Jako dosud: " + ", ".join(top_k))
+        q3_text = "Kam jste schopni zboží dovézt?"
+        q3_cat = "Kam dodáváte"
     else:
-        q3 = ["Dodávka na klíč", "Bodyshopping / pronájem kapacit", "Obojí", "Celá ČR, osobní přítomnost jen výjimečně"]
-        q3_text = "Jaký model spolupráce preferujete? (U vašeho oboru nehraje lokalita hlavní roli.)"
-        q3_cat = "Forma plnění"
+        q3 = ["Dodáme hotové řešení na klíč", "Pronajímáme své lidi (bodyshopping)", "Obojí", "Kdekoli v ČR, na místě jen výjimečně"]
+        q3_text = "Jak zakázky obvykle dodáváte?"
+        q3_cat = "Jak dodáváte"
 
-    q4 = {"stavebnictvi": ["Autorizace ČKAIT", "Stavbyvedoucí s praxí 5+ let", "ISO 9001 / 14001 / 45001", "Reference nad 10 mil. Kč", "Ochota jít do konsorcia / subdodávek"],
-          "it_sw": ["ISO 27001", "Prověrka NBÚ", "Reference ve veřejné správě", "Certifikace výrobců (Microsoft, SAP, Cisco…)", "Ochota jít do konsorcia / subdodávek"],
-          "facility_sluzby": ["Náhradní plnění (chráněný trh práce)", "ISO 9001", "Pojištění odpovědnosti 10+ mil. Kč", "Reference u nemocnic / úřadů", "Ochota jít do subdodávek"],
-          "dodavky_zbozi": ["Autorizovaný distributor výrobce", "Vlastní servis", "ISO 9001", "Reference ve veřejné správě", "Ochota jít do konsorcia"],
-          "poradenstvi": ["Odborná způsobilost / autorizace", "Reference ve veřejné správě", "ISO 9001", "Klíčoví experti s praxí 5+ let", "Ochota jít do konsorcia"],
-          "jine": ["ISO 9001", "Reference ve veřejné správě", "Ochota jít do konsorcia / subdodávek"]}[vert]
+    q4 = {"stavebnictvi": ["Autorizace ČKAIT", "Stavbyvedoucí s praxí 5+ let", "ISO 9001 / 14001 / 45001", "Reference nad 10 mil. Kč", "Půjdeme i se společníkem / subdodavatelem"],
+          "it_sw": ["ISO 27001", "Prověrka NBÚ", "Reference ve veřejné správě", "Certifikace výrobců (Microsoft, SAP, Cisco…)", "Půjdeme i se společníkem / subdodavatelem"],
+          "facility_sluzby": ["Náhradní plnění (chráněný trh práce)", "ISO 9001", "Pojištění odpovědnosti 10+ mil. Kč", "Reference u nemocnic / úřadů", "Půjdeme i se společníkem / subdodavatelem"],
+          "dodavky_zbozi": KVAL_ZBOZI.get((idn["obory"] or [{}])[0].get("oddil"), KVAL_ZBOZI[None]),
+          "poradenstvi": ["Odborná způsobilost / autorizace", "Reference ve veřejné správě", "ISO 9001", "Klíčoví experti s praxí 5+ let", "Půjdeme i se společníkem / subdodavatelem"],
+          "jine": ["ISO 9001", "Reference ve veřejné správě", "Půjdeme i se společníkem / subdodavatelem"]}[vert]
 
     ci = rc.get("ci") or {}
     seg_ev = [f"{x['segment']}: {x['pocet']} " + ("výhra" if x["pocet"] == 1 else "výhry" if x["pocet"] < 5 else "výher")
               for x in h["segmenty"][:3]]
-    ev1 = ([{"text": "Vaše výhry podle oborů – " + "; ".join(seg_ev), "zdroj": "ISVZ", "rating": "A1"}] if seg_ev else
-           [{"text": "Bez historie ve veřejných zakázkách – obory odvozuji z NACE v ARES" + (" a z webu." if rc.get("web") else "."),
+    ev1 = ([{"text": "V čem jste dosud vyhrávali: " + "; ".join(x.split(" ", 1)[-1] for x in seg_ev), "zdroj": "ISVZ", "rating": "A1"}] if seg_ev else
+           [{"text": "Ve veřejných zakázkách zatím nemáte historii – obory beru z živností v ARES" + (" a z vašeho webu." if rc.get("web") else "."),
              "zdroj": "ARES", "rating": "A1"}])
     neg_n = {norm(n) for n in VERT_NEG[vert]}
     for b in [b for b in (ci.get("bila_mista") or []) if norm(b["segment"].split(" ", 1)[-1]) not in neg_n][:2]:
-        konec = len(q1) - 1 if q1 and q1[-1].startswith("Vyhnout se") else len(q1)
-        q1.insert(min(konec, 4), f"Rozšířit do: {b['segment'].split(' ', 1)[-1]}")
-        ev1.append({"text": f"{b['segment']}: u {_tvar(b['zakazniku'], 'vašeho zákazníka', 'vašich zákazníků', 'vašich zákazníků')} tu "
-                            f"konkurenti vyhráli {_tvar(b['pocet'], 'zakázku', 'zakázky', 'zakázek')} za {kc(b['objem'])} (3 roky)"
-                            + (f", hlavně {_bez_tecky(b['lidr'])}" if b.get("lidr") else "") + ".",
+        konec = len(q1) - 1 if q1 and q1[-1].startswith("Nechceme") else len(q1)
+        q1.insert(min(konec, 4), f"Nově i: {b['segment'].split(' ', 1)[-1]}")
+        n_z = b["zakazniku"]
+        kdo = ("kupuje jeden váš zákazník" if n_z == 1 else f"kupují {n_z} vaši zákazníci" if n_z <= 4 else f"kupuje {n_z} vašich zákazníků")
+        ev1.append({"text": f"Tip: {b['segment'].split(' ', 1)[-1]} – tohle od konkurence {kdo} "
+                            f"({_tvar(b['pocet'], 'zakázka', 'zakázky', 'zakázek')} za {kc(b['objem'])} za 3 roky"
+                            + (f", nejvíc {b['lidr']}" if b.get("lidr") else "") + ").",
                     "zdroj": "ISVZ", "rating": "A1"})
 
     # strategicky cil -> urcuje, co zpravodaj stavi nahoru (stavajici zakaznici / novi zadavatele / nove obory)
     k = ci.get("koncentrace")
     ev_s = []
     if k and k["zakazniku"] >= 2:
-        ev_s.append({"text": f"Největší zákazník {k['top_nazev']} = {k['top_podil'] * 100:.0f} % veřejných tržeb, "
-                             f"top 3 = {k['top3_podil'] * 100:.0f} % ({k['zakazniku']} zákazníků celkem).",
+        ev_s.append({"text": f"Váš největší zákazník {k['top_nazev']} vám dává {k['top_podil'] * 100:.0f} % tržeb od státu, "
+                             f"tři největší dohromady {k['top3_podil'] * 100:.0f} % (zákazníků máte {k['zakazniku']}).",
                      "zdroj": "ISVZ + Registr smluv", "rating": "A1"})
     t = ci.get("trend")
     if t and (t["posl12"] or t["pred12"]):
-        ev_s.append({"text": f"Vyhrané soutěže: {t['posl12']} za posledních 12 měsíců vs. {t['pred12']} v předchozích 12.",
+        ev_s.append({"text": f"Za poslední rok jste vyhráli {t['posl12']} soutěží, rok předtím {t['pred12']}.",
                      "zdroj": "ISVZ", "rating": "A1"})
-    q_strat = ["Bránit a prohloubit stávající zákazníky", "Získat nové zadavatele ve svém oboru",
-               "Vstoupit do sousedního oboru", "Dostat se k větším zakázkám"]
+    q_strat = ["Udržet a rozšířit stávající zákazníky", "Získat nové zákazníky ve svém oboru",
+               "Proniknout do nového oboru", "Získávat větší zakázky"]
     if k and k["top_podil"] >= 0.4:
-        q_strat[1] += f" (snížit závislost na {k['top_nazev'][:40]})"
+        q_strat[1] += " (být méně závislí na jednom úřadu)"
 
     # konkurenti ke sledovani: primi soupeři z ucasti, jinak lidri segmentu
     sb = ci.get("souboje") or []
     if sb:
-        q_konk = [f"{x['nazev'][:60]} – {x['stretu']}× střet, {x['my_vyhra']}:{x['oni_vyhra']}" for x in sb[:5]]
-        ev_k = [{"text": "Firmy, se kterými jste soupeřili ve stejných soutěžích (skóre vaše výhry : jejich výhry).",
+        q_konk = [f"{x['nazev'][:60]} – společných soutěží: {x['stretu']}, vyhráli jste {x['my_vyhra']}, oni {x['oni_vyhra']}" for x in sb[:5]]
+        ev_k = [{"text": "Tyhle firmy se nejčastěji hlásily do stejných soutěží jako vy. U každé vidíte, v kolika soutěžích jste se "
+                         "potkali a kolikrát z nich vyhráli vy a kolikrát oni (zbytek vyhrál někdo jiný).",
                  "zdroj": "ISVZ (účastníci)", "rating": "A1"}]
     else:
-        q_konk = [f"{x['nazev'][:60]} – lídr segmentu {x['segment']}" for x in (ci.get("lidri") or [])[:5]]
-        ev_k = [{"text": "Účastníky vašich soutěží zdroj neuvádí – nabízím největší dodavatele vašich hlavních segmentů.",
+        q_konk = [f"{x['nazev'][:60]} – největší dodavatel v oboru {x['segment'].split(' ', 1)[-1]}" for x in (ci.get("lidri") or [])[:5]]
+        ev_k = [{"text": "U vašich soutěží data neuvádějí, kdo další se přihlásil – nabízím proto největší firmy ve vašem oboru.",
                  "zdroj": "ISVZ (vítězové)", "rating": "A1"}] if q_konk else []
     q_konk = q_konk or ["Zatím nikoho – konkurenty doplním později"]
 
-    ev2 = ([{"text": f"Dosud vyhrané zakázky: typicky {kc(h['p25_czk'])} – {kc(h['p75_czk'])} (medián {kc(med)}, max {kc(h['max_czk'])}).",
+    ev2 = ([{"text": f"8 z 10 vašich vyhraných zakázek mělo hodnotu {kc(_od(h))} – {kc(_do(h))}, nejčastěji kolem {kc(med)}. "
+                     f"Největší byla za {kc(h['max_czk'])}.",
              "zdroj": "ISVZ", "rating": "A1"}] if med else [])
-    ev3 = ([{"text": "Kde jste dosud plnili: " + ", ".join(f"{x['kraj']} ({x['pocet']}×)" for x in h["kraje"][:4] if x["kraj"]),
+    ev3 = ([{"text": "Kde jste dosud zakázky dělali: " + ", ".join(f"{x['kraj']} ({x['pocet']}×)" for x in h["kraje"][:4] if x["kraj"]),
              "zdroj": "ISVZ (místo plnění)", "rating": "A1"}] if h["kraje"] else [])
     if s.get("adresa") or s.get("mesto"):
-        ev3.append({"text": f"Sídlo: {s.get('adresa') or s.get('mesto')}", "zdroj": "ARES", "rating": "A1"})
-    ev4 = [{"text": "Kvalifikace v rejstřících nedohledáme (ISO, autorizace, prověrky) – bez vaší odpovědi by zpravodaj "
-                    "doporučoval i zakázky, do kterých nemůžete podat.", "zdroj": "–", "rating": "–"}]
+        ev3.append({"text": f"Vaše sídlo: {s.get('adresa') or s.get('mesto')}", "zdroj": "ARES", "rating": "A1"})
+    ev4 = [{"text": "Certifikáty a oprávnění (ISO, autorizace, prověrky) se z veřejných rejstříků zjistit nedají, proto se ptám.",
+            "zdroj": "–", "rating": "–"}]
 
     def ot(qid, cat, text, qr, multi, proc, ev):
         return {"id": qid, "category": cat, "question_text": text, "quick_replies": qr[:6], "allow_multiple": multi,
@@ -713,20 +955,24 @@ def faze1_pravidla(rc):
         "detected_summary": shr.strip(),
         "detected_vertical": vert,
         "questions": [
-            ot("q1_scope", "Předmět a exkluze", "Co chcete hlídat přednostně a čemu se naopak vyhnout? (Můžete dopsat vlastní.)",
-               q1, True, "Určí CPV kódy a klíčová slova, podle kterých vybírám zakázky. Exkluze odfiltrují šum.", ev1),
-            ot("q5_strategy", "Strategický cíl", "Jaký je váš hlavní obchodní cíl ve veřejných zakázkách na příštích 12 měsíců?",
-               q_strat, False, "Podle cíle řadím zpravodaj: stávající zákazníci, noví zadavatelé, nebo nové obory nahoru.", ev_s),
-            ot("q6_competitors", "Konkurence", "Které konkurenty chcete systematicky sledovat?",
-               q_konk, True, "U každé nové zakázky upozorním, pokud u daného zadavatele dřív vyhrál sledovaný konkurent "
-                             "(signál, že je zadávací dokumentace psaná pro něj, nebo že s ním máte počítat v ceně).", ev_k),
-            ot("q2_budget", "Rozpočet a kapacita", "Jak velké zakázky dávají smysl a kolik dní minimálně potřebujete na přípravu nabídky?",
-               q2, True, "Vyřadí zakázky, na které nemáte kapacitu nebo čas, a malé zakázky, které se nevyplatí.", ev2),
+            ot("q1_scope", "Co dodáváte", "Jaké zakázky chcete dostávat a jaké ne?",
+               q1, True, "Označte obory, ze kterých chcete zakázky. „Nově i“ je obor, kde zatím nedodáváte, ale vaši zákazníci "
+                         "ho kupují od konkurence. Co označíte „Nechceme“, to se vám ukazovat nebude.", ev1),
+            ot("q5_strategy", "Cíl", "Čeho chcete ve veřejných zakázkách dosáhnout v příštím roce?",
+               q_strat, False, "Podle toho dám nahoru buď zakázky od vašich stávajících zákazníků, nebo od nových, nebo z nového oboru.", ev_s),
+            ot("q6_competitors", "Konkurence", "Které konkurenty chcete hlídat?",
+               q_konk, True, "Když vypíše zakázku úřad, u kterého tahle firma už dřív vyhrála, upozorním vás. "
+                             "Víte pak, s kým v soutěži nejspíš budete a s jakou cenou počítat.", ev_k),
+            ot("q2_budget", "Velikost zakázek", "Jak velké zakázky chcete?",
+               q2, True, "Zakázky, které jsou pro vás moc malé nebo moc velké, schovám.", ev2),
+            ot("q2_prep", "Čas na nabídku", "Kolik dní nejméně potřebujete na přípravu nabídky?",
+               q_prep, False, "Zakázky, kde zbývá na podání nabídky méně dní, vám neukážu – nestihli byste je.", []),
             ot("q3_region", q3_cat, q3_text, q3, False,
-               "Vzdálenost od sídla je u služeb na místě hlavní nákladová položka – mimo dojezd zakázky skryji.", ev3),
-            ot("q4_qualification", "Kvalifikace a oprávnění",
-               "Které z kvalifikačních předpokladů splňujete (ZZVZ § 77–79) a půjdete i do konsorcia?",
-               q4, True, "Zakázky s kvalifikací, kterou nemáte, označím jako KO (vyřazující).", ev4),
+               ("Vzdálené zakázky se kvůli dopravě nevyplatí – ty mimo váš dojezd schovám." if lokalni else
+                "Zakázky s místem dodání, kam zboží nedovezete, schovám." if vert == "dodavky_zbozi" else
+                "U vašeho oboru nezáleží tolik na místě, spíš na tom, jestli dodáváte hotové řešení, nebo lidi."), ev3),
+            ot("q4_qualification", "Certifikáty a oprávnění", "Co z toho máte? Zadavatelé to často vyžadují.",
+               q4, True, "Zakázky, kde zadavatel chce něco, co nemáte (zákon o zakázkách § 77–79), označím jako nevhodné.", ev4),
         ],
     }
 
@@ -764,9 +1010,9 @@ def faze2_pravidla(rc, f1, odp):
     rozsirit = []  # sousedni obory, kde nakupuji stavajici zakaznici (nabidnuto z CI analyzy)
     div_podle_nazvu = {norm(v): k for k, v in CPV_DIV.items()}
     for x in sel1:
-        if norm(x).startswith("vyhnout se"):
+        if norm(x).startswith(("vyhnout se", "nechceme")):
             neg.append(x.split(":", 1)[-1].strip())
-        elif norm(x).startswith("rozsirit do"):
+        elif norm(x).startswith(("rozsirit do", "nove i")):
             nazev = x.split(":", 1)[-1].strip()
             if div_podle_nazvu.get(norm(nazev)):
                 rozsirit.append(div_podle_nazvu[norm(nazev)] + "000000")
@@ -785,16 +1031,22 @@ def faze2_pravidla(rc, f1, odp):
     top = [c for c in h["top_cpv"] if not chci_seg or norm(CPV_DIV.get(c["cpv"][:2], "")) in chci_seg] or h["top_cpv"]
     main = [c["cpv"] for c in top[:5]]
     nc = nace_cpv(rc)
-    vybrane_nace = [codes for label, codes in nc if norm(label) in chci_seg] or [codes for _, codes in nc[:1]]
+    # NACE v ARES je slaby signal: velke firmy maji zapsane desitky zivnosti (Alza i "stravovani" a "doprava").
+    # Kdyz ma firma vlastni historii zakazek, NACE kody se pridaji jen ty, ktere si uzivatel sam vybral.
+    ma_historii = sum(c["pocet"] for c in h["top_cpv"]) >= 5
+    vybrane_nace = [codes for label, codes in nc if norm(label) in chci_seg] or ([] if ma_historii else [codes for _, codes in nc[:1]])
     for codes in vybrane_nace:
         main += [c for c in codes if c not in main]
     main = (main[:7] + [c for c in rozsirit if c not in main[:7]])[:9] or VERT_CPV_DEFAULT[vert][:2]
     secondary = [c["cpv"] for c in h["top_cpv"] if c["cpv"] not in main][:8]
-    secondary += [c for _, codes in nc for c in codes if c not in main and c not in secondary]
+    if not ma_historii:
+        secondary += [c for _, codes in nc for c in codes if c not in main and c not in secondary]
     secondary = secondary[:10] or VERT_CPV_DEFAULT[vert][2:]
 
-    # Q2 rozpocet + priprava
+    # Q2 rozpocet + priprava (dny: samostatna otazka q2_prep; starsi format je mel v q2_budget)
     sel2, txt2 = _odpoved_text(odp, "q2_budget")
+    sel2p, txt2p = _odpoved_text(odp, "q2_prep")
+    sel2 = sel2 + [x for x in sel2p + [txt2p] if x]
     lo = hi = None
     vzmr = False
     prep = 10
@@ -802,18 +1054,18 @@ def faze2_pravidla(rc, f1, odp):
         if not x:
             continue
         nx = norm(x)
-        if "priprav" in nx or "dni" in nx or "dnu" in nx:
-            m = re.search(r"(\d+)\s*(dn|dní|dnů)", x)
+        if "priprav" in nx or "dni" in nx or "dnu" in nx or "den" in nx:
+            m = re.search(r"(\d+)", x)
             if m:
                 prep = int(m.group(1))
             continue
         if nx.startswith("jako dosud"):
-            a, b = h["p25_czk"], h["p75_czk"]
+            a, b = _od(h), _do(h)
         else:
             a, b = _castka(x)
-        if "vzmr" in nx:
+        if "vzmr" in nx or nx.startswith("male zakazky"):
             vzmr = True
-            a = 0
+            a, b = 0, (6e6 if vert == "stavebnictvi" else 2e6)
         if a is not None:
             lo = a if lo is None else min(lo, a)
         if b is not None:
@@ -821,7 +1073,7 @@ def faze2_pravidla(rc, f1, odp):
         elif a is not None and not nx.startswith("jako dosud"):
             hi = None if hi is None or a >= (hi or 0) else hi
     if lo is None and hi is None and h["median_zakazky_czk"]:
-        lo, hi = (h["p25_czk"] or 0) * 0.5, (h["p75_czk"] or 0) * 2
+        lo, hi = (h["p25_czk"] or 0) * 0.5, max((h["p75_czk"] or 0) * 2, h.get("p90_czk") or 0)
     if hi is None and not h["median_zakazky_czk"]:
         # firma bez historie a bez odpovedi: nedoporucovat megazakazky (metro za miliardy pro malou firmu)
         hi = {"stavebnictvi": 20e6, "it_sw": 10e6}.get(vert, 6e6)
@@ -836,9 +1088,9 @@ def faze2_pravidla(rc, f1, odp):
     sel3, txt3 = _odpoved_text(odp, "q3_region")
     regiony, max_km, model = [], None, None
     volba = norm(" ".join(sel3) + " " + txt3)
-    if lokalni:
+    if lokalni or vert == "dodavky_zbozi":
         hq = s.get("nuts3")
-        if "cela cr" in volba or "cela republika" in volba:
+        if any(x in volba for x in ("cela cr", "cele cr", "cela republika", "kamkoli", "cele cesko")) or (not volba.strip() and not lokalni):
             regiony, max_km = ["CZ0"], None
         elif "km" in volba:
             m = re.search(r"(\d+)\s*km", volba)
@@ -857,7 +1109,7 @@ def faze2_pravidla(rc, f1, odp):
         regiony = regiony or ["CZ0"]
     else:
         regiony = ["CZ0"]
-        model = ("obojí" if "oboji" in volba else "bodyshopping" if "body" in volba or "pronajem" in volba
+        model = ("obojí" if "oboji" in volba else "bodyshopping" if "body" in volba or "pronaj" in volba
                  else "na klíč" if "klic" in volba else None)
 
     # Q4 kvalifikace
@@ -869,7 +1121,8 @@ def faze2_pravidla(rc, f1, odp):
     # Q5 strategicky cil
     sel5, txt5 = _odpoved_text(odp, "q5_strategy")
     v5 = norm(" ".join(sel5) + " " + txt5)
-    strategie = ("stavajici" if "stavajic" in v5 or "branit" in v5 else "novi_zadavatele" if "nove zadavatele" in v5
+    strategie = ("stavajici" if "stavajic" in v5 or "branit" in v5
+                 else "novi_zadavatele" if "nove zadavatele" in v5 or "nove zakazniky" in v5
                  else "nove_obory" if "sousedni" in v5 or "obor" in v5 else "vetsi_zakazky" if "vetsi" in v5 else None)
     if strategie == "vetsi_zakazky" and hi:
         hi = hi * 2  # cil rust: pripustit i vetsi zakazky nez dosud
@@ -890,7 +1143,7 @@ def faze2_pravidla(rc, f1, odp):
     dealbreakers = [f"lhůta na nabídku kratší než {prep} dní"]
     if hi:
         dealbreakers.append(f"zakázky nad {kc(hi * 1.5)} (mimo kapacitu)")
-    if lokalni and max_km:
+    if max_km:
         dealbreakers.append(f"místo plnění dál než {max_km} km od sídla")
     dealbreakers += [f"předmět: {n}" for n in neg[:3]]
 
@@ -1214,7 +1467,8 @@ def vhodnost(z, profil, tf, qv, konk, today, klienti=(), kap=None):
     sim = TfIdf.cos(qv, tf.vektor(text_zakazky(z))) if tf else 0
     sk = round(min(100, max(cs, 0) * 0.7 + min(1, sim * 2.5) * 100 * 0.3 + (15 if cs == 0 and sim > 0.25 else 0)))
     kr.append({"klic": "predmet", "otazka": "Odpovídá předmět tomu, co děláme?",
-               "odpoved": f"CPV {', '.join(cpvs[:2]) or '?'} – shoda s profilem {cs} %, textová podobnost {sim:.2f}", "skore": sk})
+               "odpoved": f"obor zakázky ({', '.join(dict.fromkeys(CPV_DIV.get(c[:2], c) for c in cpvs[:2])) or 'neuveden'}) sedí s vaším na {cs} %, název zakázky se s vaším popisem "
+                          + ("shoduje hodně" if sim >= 0.25 else "shoduje částečně" if sim >= 0.1 else "skoro neshoduje"), "skore": sk})
 
     # 2 lokalita: plynuly pokles s dojezdovou vzdalenosti (logisticka krivka kolem limitu)
     kn, misto = misto_zakazky(z)
@@ -1296,11 +1550,11 @@ def vhodnost(z, profil, tf, qv, konk, today, klienti=(), kap=None):
         sk = 100 * math.exp(-(pn - 1) / 4) if pn else 55        # 1 nabidka -> 100, 3 -> 61, 5 -> 37
         if k.get("top_podil") and k["top_podil"] > 0.4:
             sk *= 1 - (k["top_podil"] - 0.4)                     # jeden dodavatel vyhrava vetsinu -> horsi sance
-        odp = (f"v segmentu průměrně {pn:.1f} nabídky" if pn else "počet nabídek neznámý") + \
+        odp = (f"v oboru průměrně {pn:.1f} nabídky".replace(".", ",") if pn else "počet nabídek neznámý") + \
               (f", největší dodavatel vyhrává {k['top_podil'] * 100:.0f} %" if k.get("top_podil") is not None else "")
         kr.append({"klic": "konkurence", "otazka": "Jak silná je konkurence?", "odpoved": odp, "skore": round(max(5, sk))})
     else:
-        kr.append({"klic": "konkurence", "otazka": "Jak silná je konkurence?", "odpoved": "málo dat o segmentu", "skore": None})
+        kr.append({"klic": "konkurence", "otazka": "Jak silná je konkurence?", "odpoved": "málo dat o oboru", "skore": None})
 
     # 7 kvalifikace: obrat a reference z verejnych dat + co zadavatel uvadi + profil
     sk7, odp7, ko7 = _kvalifikace(z, profil, kap)

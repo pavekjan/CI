@@ -36,3 +36,17 @@ export function datum(d: string | null | undefined): string {
   const [y, m, dd] = d.slice(0, 10).split("-");
   return `${Number(dd)}. ${Number(m)}. ${y}`;
 }
+
+/** "2023-12" -> "12/2023" (citelne obdobi bez zkratek mesicu) */
+export function mesicCislem(m: string): string {
+  const [y, mm] = m.split("-");
+  return `${Number(mm)}/${y}`;
+}
+
+/** Kdy byly zakazky zahajeny (roky) a za jake mesice jsou stazene exporty registru. */
+export function obdobiZakazek(s: { od: string | null; do: string | null; obdobi?: { rvz_od: string | null; rvz_do: string | null } }): string | undefined {
+  if (!s.od || !s.do) return undefined;
+  const roky = `zahájené hlavně ${s.od.slice(0, 4)}–${s.do.slice(0, 4)}`;
+  const o = s.obdobi;
+  return o?.rvz_od && o.rvz_do ? `${roky} · exporty registru ${mesicCislem(o.rvz_od)}–${mesicCislem(o.rvz_do)}` : roky;
+}
